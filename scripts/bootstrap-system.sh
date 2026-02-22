@@ -131,7 +131,84 @@ sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_
 sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 systemctl restart sshd
 
-log "Step 12: Marking bootstrap as complete..."
+log "Step 12: Installing clouddesktop auto-stop service..."
+
+cat > /usr/local/bin/clouddesktop-autostop <<'AUTOSTOP_SCRIPT'
+#!/bin/bash
+# clouddesktop-autostop: Shuts down the instance after 4 hours of SSH inactivity.
+# Invoked every 15 minutes by clouddesktop-autostop.timer.
+
+set -euo pipefail
+
+SENTINEL="/var/log/bootstrap-system-complete"
+COUNTER_FILE="/var/run/clouddesktop-idle-count"
+IDLE_THRESHOLD=16
+LOG_TAG="clouddesktop-autostop"
+
+log() {
+  logger -t "$LOG_TAG" "$*"
+}
+
+if [[ ! -f "$SENTINEL" ]]; then
+  log "Bootstrap not yet complete. Skipping idle check."
+  exit 0
+fi
+
+ssh_session_count=$(who | grep -c "pts/" || true)
+
+if [[ "$ssh_session_count" -gt 0 ]]; then
+  log "Active SSH sessions detected ($ssh_session_count). Resetting idle counter."
+  echo 0 > "$COUNTER_FILE"
+  exit 0
+fi
+
+current_count=0
+if [[ -f "$COUNTER_FILE" ]]; then
+  current_count=$(cat "$COUNTER_FILE")
+fi
+
+new_count=$((current_count + 1))
+echo "$new_count" > "$COUNTER_FILE"
+
+log "No active SSH sessions. Idle check $new_count/$IDLE_THRESHOLD."
+
+if [[ "$new_count" -ge "$IDLE_THRESHOLD" ]]; then
+  log "Idle threshold reached ($IDLE_THRESHOLD consecutive checks, 4 hours). Initiating shutdown."
+  shutdown -h now
+fi
+AUTOSTOP_SCRIPT
+
+chmod 755 /usr/local/bin/clouddesktop-autostop
+
+cat > /etc/systemd/system/clouddesktop-autostop.service <<'AUTOSTOP_SERVICE'
+[Unit]
+Description=CloudDesktop auto-stop idle check
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/clouddesktop-autostop
+StandardOutput=journal
+StandardError=journal
+AUTOSTOP_SERVICE
+
+cat > /etc/systemd/system/clouddesktop-autostop.timer <<'AUTOSTOP_TIMER'
+[Unit]
+Description=CloudDesktop auto-stop timer (runs every 15 minutes)
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+AUTOSTOP_TIMER
+
+systemctl daemon-reload
+systemctl enable clouddesktop-autostop.timer
+systemctl start clouddesktop-autostop.timer
+
+log "Step 13: Marking bootstrap as complete..."
 touch /var/log/bootstrap-system-complete
 
 log "Bootstrap complete. Instance is ready for developer-specific setup."
