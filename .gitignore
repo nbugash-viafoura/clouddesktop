@@ -1,0 +1,23 @@
+# Binaries
+bin/
+clouddesktop
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage.out
+
+# Terraform local state (should use S3 backend)
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
