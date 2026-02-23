@@ -1,12 +1,5 @@
-data "aws_ssm_parameter" "vpc_id" {
-  name = "/clouddesktop/shared/vpc_id"
-}
-
-data "aws_subnets" "clouddesktop" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_ssm_parameter.vpc_id.value]
-  }
+data "aws_ssm_parameter" "subnet_id" {
+  name = "/clouddesktop/shared/subnet_id"
 }
 
 data "aws_ssm_parameter" "security_group_id" {
@@ -45,7 +38,7 @@ resource "aws_key_pair" "developer" {
 resource "aws_instance" "developer" {
   ami                     = data.aws_ami.ubuntu_22_04.id
   instance_type           = var.instance_type
-  subnet_id               = data.aws_subnets.clouddesktop.ids[0]
+  subnet_id               = data.aws_ssm_parameter.subnet_id.value
   vpc_security_group_ids  = [data.aws_ssm_parameter.security_group_id.value]
   key_name                = aws_key_pair.developer.key_name
   iam_instance_profile    = data.aws_ssm_parameter.instance_profile_name.value

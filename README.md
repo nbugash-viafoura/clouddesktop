@@ -284,7 +284,7 @@ clouddesktop/
     terraform/                   # Terraform CLI wrapper
     config/                      # ~/.clouddesktop/config.yaml read/write
   terraform/
-    shared/                      # Tier 1: one-time shared infra (IAM, SG, state backend)
+    shared/                      # Tier 1: one-time shared infra (IAM, SG, SSM params, state backend)
     instance/                    # Tier 2: per-developer EC2 instance
   scripts/
     bootstrap-system.sh          # System tooling (runs via user_data on first provision)
@@ -298,7 +298,7 @@ This section covers the one-time shared infrastructure setup. This is done by an
 
 ### Shared Infrastructure (Tier 1)
 
-Tier 1 creates the resources that all developer instances share: IAM instance profile, security group, S3 state bucket, and DynamoDB lock table. This only needs to be done once.
+Tier 1 creates the resources that all developer instances share: IAM instance profile, security group, S3 state bucket, and DynamoDB lock table. All resources are created in the existing Development VPC (`vpc-597ca83c`, `10.3.0.0/16`). Instances deploy into the "Services - B" subnet (`subnet-d3facefb`, us-east-1b). This only needs to be done once.
 
 **AWS resources created:**
 
@@ -307,8 +307,8 @@ Tier 1 creates the resources that all developer instances share: IAM instance pr
 | S3 bucket (`viafoura-clouddesktop-tfstate`) | Stores Terraform state for shared infra and all developer instances |
 | DynamoDB table (`viafoura-clouddesktop-tfstate-lock`) | Prevents concurrent Terraform operations from corrupting state |
 | IAM role + instance profile (`clouddesktop-developer-instance`) | Grants EC2 instances access to SSM, CloudWatch, and ECR (read-only) |
-| Security group (`clouddesktop-developer-instance`) | Zero inbound rules, all outbound allowed. Attached to every developer instance. |
-| SSM parameters (2) | Stores SG ID and instance profile name for developer Terraform to reference |
+| Security group (`clouddesktop-developer-instance`) | Zero inbound rules, all outbound allowed. Created in the Development VPC. Attached to every developer instance. |
+| SSM parameters (4) | Stores SG ID, instance profile name, VPC ID, and subnet ID for developer Terraform to reference |
 
 **Steps:**
 
@@ -337,6 +337,8 @@ AWS_PROFILE=test-terraform terraform init -migrate-state
 # 7. Verify SSM parameters were written
 aws ssm get-parameter --name /clouddesktop/shared/security_group_id --profile test-developers
 aws ssm get-parameter --name /clouddesktop/shared/instance_profile_name --profile test-developers
+aws ssm get-parameter --name /clouddesktop/shared/vpc_id --profile test-developers
+aws ssm get-parameter --name /clouddesktop/shared/subnet_id --profile test-developers
 ```
 
 After this, shared infrastructure is done. The `test-terraform` profile is not needed again unless you modify `terraform/shared/`.
@@ -370,7 +372,7 @@ If you need to remove all shared infrastructure (not just a single developer's i
 1. Ensure all developers have run `clouddesktop destroy --confirm` first
 2. Navigate to `terraform/shared/` and run `AWS_PROFILE=test-terraform terraform destroy`
 
-This removes the IAM role, security group, SSM parameters, S3 bucket, and DynamoDB table.
+This removes the IAM role, security group, SSM parameters, S3 bucket, and DynamoDB table. The Development VPC and its subnets are not affected.
 
 ## Troubleshooting
 
