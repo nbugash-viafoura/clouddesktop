@@ -35,6 +35,7 @@ func TestRenderSSHConfigBlock(t *testing.T) {
 		{"HostName", "HostName i-0abc123def456"},
 		{"User", "User ubuntu"},
 		{"IdentityFile", "IdentityFile /home/dev/.ssh/id_ed25519"},
+		{"ForwardAgent", "ForwardAgent yes"},
 		{"ProxyCommand profile", "--profile test-developers"},
 		{"ProxyCommand region", "--region us-east-1"},
 		{"ServerAliveInterval", "ServerAliveInterval 60"},

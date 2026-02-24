@@ -122,9 +122,11 @@ Host clouddesktop
   HostName <instance-id>
   User ubuntu
   IdentityFile ~/.ssh/viafoura_dev
+  ForwardAgent yes
   ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p --profile test-developers --region us-east-1
   ServerAliveInterval 60
   ServerAliveCountMax 3
+  StrictHostKeyChecking accept-new
 ```
 
 ### Connect
@@ -159,10 +161,12 @@ clouddesktop ssh
 ./bootstrap-dev.sh
 ```
 
-This configures:
-- GitHub deploy key for cloning private repos
+This verifies and configures:
+- SSH agent forwarding is working and GitHub SSH access is available
 - `.testcontainers.properties` for Java integration tests
 - Optional dotfiles clone via `DOTFILES_REPO` environment variable
+
+**Important:** Before running `bootstrap-dev.sh`, make sure your local SSH key is loaded into your agent and added to your GitHub account. See the [Troubleshooting](#troubleshooting) section if you run into issues.
 
 ### Check Status
 
@@ -397,3 +401,69 @@ Set the `CLOUDDESKTOP_REPO_DIR` environment variable to the root of this reposit
 ```bash
 export CLOUDDESKTOP_REPO_DIR=/path/to/clouddesktop
 ```
+
+### SSH Agent Forwarding Issues
+
+`clouddesktop` uses SSH agent forwarding to give the remote instance access to your local SSH keys. This means your private key never leaves your laptop -- the instance borrows it through the SSH connection. This is how `git clone` and `git push` work on the instance without storing secrets there.
+
+**`bootstrap-dev.sh` fails with "No SSH keys available via agent forwarding"**
+
+Your SSH key isn't loaded into your local agent. Load it before connecting:
+
+```bash
+# On your laptop
+ssh-add ~/.ssh/viafoura_dev
+
+# Verify it's loaded
+ssh-add -l
+# Should show something like:
+# 256 SHA256:abc123... your-name@clouddesktop (ED25519)
+```
+
+Then reconnect to the instance. The key will be forwarded automatically because `ForwardAgent yes` is in the SSH config.
+
+If your key requires a passphrase and you're on macOS, you can add it to Keychain so you don't have to re-enter it every time:
+```bash
+ssh-add --apple-use-keychain ~/.ssh/viafoura_dev
+```
+
+**`bootstrap-dev.sh` fails with "GitHub SSH authentication failed"**
+
+Your SSH key is loaded in the agent but not registered with GitHub. Add it:
+
+1. Copy your public key: `cat ~/.ssh/viafoura_dev.pub | pbcopy`
+2. Go to [github.com/settings/keys](https://github.com/settings/keys)
+3. Click "New SSH key", paste the public key, and save
+
+Then reconnect and re-run `bootstrap-dev.sh`.
+
+You can verify locally before connecting:
+```bash
+ssh -T git@github.com
+# Should print: Hi <username>! You've successfully authenticated...
+```
+
+**Agent forwarding works on first connect but stops after reconnecting**
+
+This can happen if your agent lost the key (e.g., after a laptop restart). Re-add it:
+```bash
+ssh-add ~/.ssh/viafoura_dev
+```
+
+On macOS, keys added without `--apple-use-keychain` don't survive reboots.
+
+**How to verify agent forwarding is working on the instance**
+
+SSH into the instance and run:
+```bash
+# Check if the agent has forwarded keys
+ssh-add -l
+
+# Test GitHub access directly
+ssh -T git@github.com
+```
+
+If `ssh-add -l` returns "The agent has no identities" or "Could not open a connection to your authentication agent", agent forwarding isn't working. Check that:
+1. Your key is loaded locally (`ssh-add -l` on your laptop)
+2. You connected via the `clouddesktop` SSH host (which has `ForwardAgent yes`)
+3. You didn't connect through an intermediate jump host that strips agent forwarding

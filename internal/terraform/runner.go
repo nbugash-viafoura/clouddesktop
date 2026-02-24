@@ -138,24 +138,22 @@ func (r *Runner) Init(ctx context.Context) error {
 }
 
 // Apply executes terraform apply with the provided variables. The apply runs
-// non-interactively via -auto-approve. Variable values are quoted to safely handle
-// special characters.
+// non-interactively via -auto-approve.
 func (r *Runner) Apply(ctx context.Context, vars map[string]string) error {
 	args := []string{"apply", "-auto-approve"}
 	for k, v := range vars {
-		args = append(args, "-var", k+"="+quoteVarValue(v))
+		args = append(args, "-var", k+"="+v)
 	}
 	_, err := r.runCmd(ctx, args...)
 	return err
 }
 
 // Destroy executes terraform destroy with the provided variables. The destroy
-// runs non-interactively via -auto-approve. Variable values are quoted to safely
-// handle special characters.
+// runs non-interactively via -auto-approve.
 func (r *Runner) Destroy(ctx context.Context, vars map[string]string) error {
 	args := []string{"destroy", "-auto-approve"}
 	for k, v := range vars {
-		args = append(args, "-var", k+"="+quoteVarValue(v))
+		args = append(args, "-var", k+"="+v)
 	}
 	_, err := r.runCmd(ctx, args...)
 	return err
@@ -166,10 +164,3 @@ func (r *Runner) Output(ctx context.Context, key string) (string, error) {
 	return r.runCmd(ctx, "output", "-raw", key)
 }
 
-// quoteVarValue safely quotes a Terraform variable value to handle special characters.
-// It uses JSON-style quoting which Terraform understands for string values.
-func quoteVarValue(val string) string {
-	escaped := strings.ReplaceAll(val, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-	return `"` + escaped + `"`
-}

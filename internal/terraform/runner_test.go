@@ -82,45 +82,6 @@ func TestNewRunner(t *testing.T) {
 	}
 }
 
-// TestQuoteVarValue verifies that variable values are quoted safely.
-func TestQuoteVarValue(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{"simple alphanumeric", "hello", `"hello"`},
-		{"with spaces", "hello world", `"hello world"`},
-		{"with quotes", `hello"world`, `"hello\"world"`},
-		{"with backslash", `hello\world`, `"hello\\world"`},
-		{"complex", `test"path\file`, `"test\"path\\file"`},
-		{"empty string", "", `""`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := quoteVarValue(tt.input)
-			if result != tt.expected {
-				t.Errorf("quoteVarValue(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
-// TestQuoteVarValuePreventInjection verifies variable quoting prevents injection.
-func TestQuoteVarValuePreventInjection(t *testing.T) {
-	input := `test"; rm -rf /`
-	result := quoteVarValue(input)
-
-	if len(result) < 5 {
-		t.Errorf("quoteVarValue should add quotes, got %q", result)
-	}
-
-	if result[0] != '"' || result[len(result)-1] != '"' {
-		t.Errorf("quoteVarValue(%q) = %q, should be quoted", input, result)
-	}
-}
-
 // TestApplyConstructsVarArgs verifies that Apply builds correct terraform arguments.
 func TestApplyConstructsVarArgs(t *testing.T) {
 	mock := &mockExecutor{result: &CommandResult{Stdout: "", Stderr: ""}}
@@ -167,8 +128,8 @@ func TestApplyConstructsVarArgs(t *testing.T) {
 	sort.Strings(varArgs)
 
 	expected := []string{
-		`developer_name="john-dev"`,
-		`instance_type="m7i.xlarge"`,
+		`developer_name=john-dev`,
+		`instance_type=m7i.xlarge`,
 	}
 	sort.Strings(expected)
 

@@ -2,6 +2,10 @@
 # CloudDesktop Developer Bootstrap Script
 # Run manually by the developer after first SSH connection
 # Make executable with: chmod +x bootstrap-dev.sh
+#
+# Prerequisites:
+#   - SSH agent forwarding must be enabled (ForwardAgent yes in SSH config)
+#   - Your local SSH key must be added to your GitHub account
 
 set -euo pipefail
 
@@ -13,47 +17,25 @@ log "Starting CloudDesktop developer bootstrap..."
 log "This script runs as the ubuntu user and configures your personal development environment."
 echo ""
 
-log "Step 1: Setting up GitHub deploy key..."
-if [ ! -f "$HOME/.ssh/github_deploy" ]; then
-  ssh-keygen -t ed25519 -C "clouddesktop-$(hostname)" -f "$HOME/.ssh/github_deploy" -N ""
-  log "GitHub deploy key generated at ~/.ssh/github_deploy"
-  echo ""
-  echo "=================================================================================="
-  echo "Add the following public key as a deploy key to your GitHub repositories:"
-  echo "  GitHub Settings -> Deploy keys -> Add deploy key"
-  echo "  Check 'Allow write access' if you need to push commits"
-  echo "=================================================================================="
-  echo ""
-  cat "$HOME/.ssh/github_deploy.pub"
-  echo ""
-  echo "=================================================================================="
-  read -p "Press Enter once you have added the deploy key to GitHub..."
-else
-  log "GitHub deploy key already exists at ~/.ssh/github_deploy. Skipping generation."
+log "Step 1: Verifying SSH agent forwarding and GitHub access..."
+if ! ssh-add -l &>/dev/null; then
+  log "ERROR: No SSH keys available via agent forwarding."
+  log "Make sure your local SSH agent has your key loaded (ssh-add ~/.ssh/viafoura_dev)"
+  log "and that you connected with agent forwarding (ssh -A clouddesktop)."
+  exit 1
 fi
+log "SSH agent has forwarded keys."
 
-log "Configuring SSH to use the deploy key for github.com..."
-mkdir -p "$HOME/.ssh"
-if ! grep -q "Host github.com" "$HOME/.ssh/config" 2>/dev/null; then
-  cat >> "$HOME/.ssh/config" <<'EOF'
-Host github.com
-  IdentityFile ~/.ssh/github_deploy
-  StrictHostKeyChecking accept-new
-EOF
-  chmod 600 "$HOME/.ssh/config"
-  log "SSH config updated for github.com"
-else
-  log "SSH config already contains github.com host entry. Skipping."
-fi
-
-log "Step 2: Testing GitHub SSH connection..."
 if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
-  log "GitHub SSH connection successful"
+  log "GitHub SSH connection verified via agent forwarding."
 else
-  log "GitHub SSH connection test completed (exit code indicates success for GitHub)"
+  log "ERROR: GitHub SSH authentication failed."
+  log "Make sure your SSH key is added to your GitHub account at github.com/settings/keys"
+  log "Debug: Run 'ssh-add -l' to see loaded keys, 'ssh -vT git@github.com' to debug."
+  exit 1
 fi
 
-log "Step 3: Configuring Testcontainers..."
+log "Step 2: Configuring Testcontainers..."
 cat > "$HOME/.testcontainers.properties" <<'EOF'
 docker.host=unix:///var/run/docker.sock
 ryuk.disabled=true
@@ -61,7 +43,7 @@ host.override=127.0.0.1
 EOF
 log "Testcontainers configuration written to ~/.testcontainers.properties"
 
-log "Step 4: Checking for optional dotfiles repository..."
+log "Step 3: Checking for optional dotfiles repository..."
 if [ -n "${DOTFILES_REPO:-}" ]; then
   log "DOTFILES_REPO set to: $DOTFILES_REPO"
   if [ ! -d "$HOME/.dotfiles" ]; then

@@ -87,6 +87,7 @@ Host %s
   HostName %s
   User %s
   IdentityFile %s
+  ForwardAgent yes
   ProxyCommand aws ssm start-session --target %%h --document-name AWS-StartSSHSession --parameters portNumber=%%p --profile %s --region %s
   ServerAliveInterval 60
   ServerAliveCountMax 3
