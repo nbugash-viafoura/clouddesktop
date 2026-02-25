@@ -622,8 +622,8 @@ func TestFindUbuntuAMI_NoImages(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for no AMIs")
 	}
-	if !strings.Contains(err.Error(), "no Ubuntu 22.04 AMI found") {
-		t.Errorf("error = %q, want to contain 'no Ubuntu 22.04 AMI found'", err)
+	if !strings.Contains(err.Error(), "no Ubuntu 24.04 AMI found") {
+		t.Errorf("error = %q, want to contain 'no Ubuntu 24.04 AMI found'", err)
 	}
 }
 

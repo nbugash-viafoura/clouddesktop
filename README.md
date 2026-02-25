@@ -4,12 +4,12 @@ A self-service CLI tool for provisioning and managing personal cloud development
 
 ## Why
 
-Local developer machines allocate 8 CPU + 16 GB RAM to Colima, leaving the laptop in survival mode for the IDE and browser. `clouddesktop` moves that compute to an EC2 instance where Docker runs natively (no VM layer, no hypervisor overhead). The local machine only runs the IDE frontend — all builds, containers, and tests execute on the remote instance.
+Local developer machines allocate 8 CPU + 16 GB RAM to Colima(if you're using MacOS), leaving the laptop in survival mode for the IDE and browser. `clouddesktop` moves that compute to an EC2 instance where Docker runs natively (no VM layer, no hypervisor overhead). The local machine only runs the IDE frontend — all builds, containers, and tests execute on the remote instance.
 
 ## How It Works
 
-- **Provision**: `clouddesktop up` creates an EC2 instance via Terraform on first run
-- **Start/Stop**: subsequent `clouddesktop up` and `clouddesktop down` start and stop the instance directly (no Terraform, ~30 seconds)
+- **Provision**: `clouddesktop up` creates an EC2 instance via the AWS SDK on first run (~2 minutes)
+- **Start/Stop**: subsequent `clouddesktop up` and `clouddesktop down` start and stop the instance (~30 seconds)
 - **Persist**: stopping an instance preserves the EBS volume — repos, Docker image cache, Gradle/npm caches, shell history all survive across sessions
 - **Connect**: SSH tunneled through AWS SSM Session Manager (zero open inbound ports). JetBrains Gateway and VS Code Remote SSH work transparently via the SSH config entry `clouddesktop` writes automatically
 - **Destroy**: `clouddesktop destroy --confirm` terminates the instance and deletes all data. Requires explicit confirmation.
@@ -27,16 +27,18 @@ Compute cost is incurred only while the instance is running. Stopped instances o
 
 Install the following on your local machine before using `clouddesktop`:
 
-### 1. Go (for building clouddesktop)
+### 1. AWS CLI v2
 
-```bash
-brew install go
-```
-
-### 2. AWS CLI v2
+macOS:
 
 ```bash
 brew install awscli
+```
+
+Ubuntu
+
+```bash
+apt install awscli
 ```
 
 Verify your AWS profile is configured. `clouddesktop` uses the `test-developers` profile by default:
@@ -47,12 +49,22 @@ aws sts get-caller-identity --profile test-developers
 
 If your session has expired, run `sts` to refresh MFA credentials first.
 
-### 3. SSM Session Manager Plugin
+### 2. SSM Session Manager Plugin
 
 Required for SSH access through SSM (no direct port 22):
 
+macOS:
+
 ```bash
 brew install --cask session-manager-plugin
+```
+
+Ubuntu:
+
+```bash
+curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o "session-manager-plugin.deb"
+sudo dpkg -i session-manager-plugin.deb
+rm session-manager-plugin.deb
 ```
 
 Verify the installation:
@@ -61,15 +73,7 @@ Verify the installation:
 session-manager-plugin
 ```
 
-### 4. Terraform
-
-```bash
-brew install terraform
-```
-
-`clouddesktop` calls `terraform` under the hood during provisioning, resize, and destroy operations.
-
-### 5. SSH Key Pair
+### 3. SSH Key Pair
 
 Generate a dedicated key pair for your cloud desktop:
 
@@ -80,6 +84,30 @@ ssh-keygen -t ed25519 -f ~/.ssh/viafoura_dev -C "your-name@clouddesktop"
 This creates `~/.ssh/viafoura_dev` (private) and `~/.ssh/viafoura_dev.pub` (public). The public key is uploaded to AWS during provisioning. The private key stays on your laptop.
 
 ## Installation
+
+### Download (recommended)
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/nbugash-viafoura/clouddesktop/releases/latest):
+
+```bash
+# macOS Apple Silicon
+curl -L https://github.com/nbugash-viafoura/clouddesktop/releases/latest/download/clouddesktop-<version>-darwin-arm64.tar.gz | tar xz
+sudo mv clouddesktop /usr/local/bin/
+
+# macOS Intel
+curl -L https://github.com/nbugash-viafoura/clouddesktop/releases/latest/download/clouddesktop-<version>-darwin-amd64.tar.gz | tar xz
+sudo mv clouddesktop /usr/local/bin/
+
+# Linux
+curl -L https://github.com/nbugash-viafoura/clouddesktop/releases/latest/download/clouddesktop-<version>-linux-amd64.tar.gz | tar xz
+sudo mv clouddesktop /usr/local/bin/
+```
+
+Replace `<version>` with the release tag (e.g., `v1.0.0`). Verify with `clouddesktop --version`.
+
+### Build from source
+
+Requires Go 1.23+:
 
 ```bash
 git clone git@github.com:nbugash-viafoura/clouddesktop.git
@@ -113,7 +141,7 @@ Writes configuration to `~/.clouddesktop/config.yaml`.
 clouddesktop up
 ```
 
-On first run, this provisions an EC2 instance via Terraform (~2 minutes for infrastructure, ~10 minutes for bootstrap). On subsequent runs, it starts the existing stopped instance (~30 seconds).
+On first run, this provisions an EC2 instance (~2 minutes for infrastructure, ~10 minutes for bootstrap). On subsequent runs, it starts the existing stopped instance (~30 seconds).
 
 After the instance is running, `clouddesktop up` automatically writes an SSH config entry to `~/.ssh/config`:
 
@@ -190,7 +218,7 @@ Stops the instance. All data is preserved on the EBS volume. No compute cost whi
 clouddesktop resize m7i.2xlarge
 ```
 
-Changes the instance type. Stops the instance if running, applies the change via Terraform, then restarts. Use this if CloudWatch metrics show you need more resources.
+Changes the instance type. Stops the instance if running, applies the change, then restarts. Use this if CloudWatch metrics show you need more resources.
 
 ### Destroy
 
@@ -198,7 +226,7 @@ Changes the instance type. Stops the instance if running, applies the change via
 clouddesktop destroy --confirm
 ```
 
-Permanently terminates the instance and deletes all data (EBS volume, key pair, Terraform state). The `--confirm` flag is required. After destroying, run `clouddesktop init` to start fresh.
+Permanently terminates the instance and deletes all associated resources (EBS volume, key pair). The `--confirm` flag is required. After destroying, run `clouddesktop init` to start fresh.
 
 ## Commands Reference
 
@@ -264,18 +292,9 @@ Developer Laptop                         AWS (us-east-1)
                                          +---------------------------+
 ```
 
-### Terraform State
+### Instance State
 
-Each developer's instance state is isolated in S3:
-
-```
-s3://viafoura-clouddesktop-tfstate/
-  shared/terraform.tfstate              # Shared infra (SG, IAM, state backend)
-  developers/nico/terraform.tfstate     # Nico's instance
-  developers/alice/terraform.tfstate    # Alice's instance
-```
-
-A DynamoDB table (`viafoura-clouddesktop-tfstate-lock`) prevents concurrent Terraform operations from corrupting state.
+Each developer's instance configuration is stored locally in `~/.clouddesktop/config.yaml`. This file tracks the instance ID, developer name, AWS profile, region, and instance type. It is created by `clouddesktop init` and updated automatically as you provision, resize, or destroy instances.
 
 ## Repository Structure
 
@@ -284,15 +303,17 @@ clouddesktop/
   cmd/clouddesktop/main.go       # CLI entry point
   internal/
     cli/                         # One file per command
-    aws/                         # AWS SDK clients (EC2, SSM, CloudWatch, STS)
-    terraform/                   # Terraform CLI wrapper
+    aws/                         # AWS SDK clients (EC2, SSM, CloudWatch, STS, provisioner)
     config/                      # ~/.clouddesktop/config.yaml read/write
+    version/                     # Build-time version info (injected via ldflags)
   terraform/
-    shared/                      # Tier 1: one-time shared infra (IAM, SG, SSM params, state backend)
-    instance/                    # Tier 2: per-developer EC2 instance
+    shared/                      # One-time shared infra (IAM, SG, SSM params, state backend)
   scripts/
-    bootstrap-system.sh          # System tooling (runs via user_data on first provision)
-    .bootstrap-dev.sh             # Developer setup (run manually after first SSH)
+    bootstrap-system.sh          # System tooling (embedded, runs via user_data on first provision)
+    .bootstrap-dev.sh            # Developer setup (copied to instance, run manually after first SSH)
+    embed.go                     # Embeds scripts into the binary
+  .github/
+    workflows/release.yml        # Builds and publishes releases on tag push
   Makefile
 ```
 
@@ -308,11 +329,11 @@ Tier 1 creates the resources that all developer instances share: IAM instance pr
 
 | Resource | Purpose |
 |---|---|
-| S3 bucket (`viafoura-clouddesktop-tfstate`) | Stores Terraform state for shared infra and all developer instances |
-| DynamoDB table (`viafoura-clouddesktop-tfstate-lock`) | Prevents concurrent Terraform operations from corrupting state |
+| S3 bucket (`viafoura-clouddesktop-tfstate`) | Stores Terraform state for shared infrastructure |
+| DynamoDB table (`viafoura-clouddesktop-tfstate-lock`) | Prevents concurrent Terraform operations on shared infra |
 | IAM role + instance profile (`clouddesktop-developer-instance`) | Grants EC2 instances access to SSM, CloudWatch, and ECR (read-only) |
 | Security group (`clouddesktop-developer-instance`) | Zero inbound rules, all outbound allowed. Created in the Development VPC. Attached to every developer instance. |
-| SSM parameters (4) | Stores SG ID, instance profile name, VPC ID, and subnet ID for developer Terraform to reference |
+| SSM parameters (4) | Stores SG ID, instance profile name, VPC ID, and subnet ID for the CLI to reference at provisioning time |
 
 **Steps:**
 
@@ -376,7 +397,7 @@ If you need to remove all shared infrastructure (not just a single developer's i
 1. Ensure all developers have run `clouddesktop destroy --confirm` first
 2. Navigate to `terraform/shared/` and run `AWS_PROFILE=test-terraform terraform destroy`
 
-This removes the IAM role, security group, SSM parameters, S3 bucket, and DynamoDB table. The Development VPC and its subnets are not affected.
+This removes the IAM role, security group, SSM parameters, S3 bucket, and DynamoDB table. The Development VPC and subnets are not affected.
 
 ## Troubleshooting
 
@@ -395,12 +416,6 @@ tail -f /var/log/bootstrap-system.log
 
 **SSH connection refused**
 Ensure the SSM Session Manager plugin is installed (`session-manager-plugin`). Also verify the instance is running with `clouddesktop status`.
-
-**"cannot find terraform/instance directory"**
-Set the `CLOUDDESKTOP_REPO_DIR` environment variable to the root of this repository:
-```bash
-export CLOUDDESKTOP_REPO_DIR=/path/to/clouddesktop
-```
 
 ### SSH Agent Forwarding Issues
 

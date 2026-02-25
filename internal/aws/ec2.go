@@ -231,12 +231,12 @@ func (c *EC2Client) ModifyInstanceType(ctx context.Context, instanceID, newType 
 	return nil
 }
 
-// FindUbuntuAMI finds the latest Ubuntu 22.04 amd64 AMI from Canonical.
+// FindUbuntuAMI finds the latest Ubuntu 24.04 amd64 AMI from Canonical.
 func (c *EC2Client) FindUbuntuAMI(ctx context.Context) (string, error) {
 	output, err := c.client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		Owners: []string{"099720109477"}, // Canonical
 		Filters: []types.Filter{
-			{Name: strPtr("name"), Values: []string{"ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"}},
+			{Name: strPtr("name"), Values: []string{"ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"}},
 			{Name: strPtr("virtualization-type"), Values: []string{"hvm"}},
 			{Name: strPtr("state"), Values: []string{"available"}},
 		},
@@ -246,7 +246,7 @@ func (c *EC2Client) FindUbuntuAMI(ctx context.Context) (string, error) {
 	}
 
 	if len(output.Images) == 0 {
-		return "", fmt.Errorf("no Ubuntu 22.04 AMI found")
+		return "", fmt.Errorf("no Ubuntu 24.04 AMI found")
 	}
 
 	// Sort by creation date descending to get the latest.
