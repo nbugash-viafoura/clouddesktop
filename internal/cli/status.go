@@ -95,9 +95,10 @@ func runStatus() error {
 	}
 
 	fmt.Println()
-	if info.State == "running" {
+	switch info.State {
+	case "running":
 		fmt.Println("Connect with: ssh clouddesktop")
-	} else if info.State == "stopped" {
+	case "stopped":
 		fmt.Println("Start with: clouddesktop up")
 	}
 

@@ -291,7 +291,7 @@ func TestWriteSSHConfigTo_WriteFileError(t *testing.T) {
 	if err := os.Chmod(configPath, 0400); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(configPath, 0600) })
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0600) })
 
 	err := writeSSHConfigTo(sshDir, configPath, testEntry())
 	if err == nil {
