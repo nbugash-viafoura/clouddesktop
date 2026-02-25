@@ -24,8 +24,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			},
+				},
 			wantError: false,
 		},
 		{
@@ -36,8 +35,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			},
+				},
 			wantError: true,
 			errorMsg:  "aws_profile is required",
 		},
@@ -49,8 +47,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			},
+				},
 			wantError: true,
 			errorMsg:  "region is required",
 		},
@@ -62,8 +59,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				InstanceType:  "m7i.xlarge",
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
-				StateS3Bucket: "bucket",
-			},
+				},
 			wantError: true,
 			errorMsg:  "developer_name is required",
 		},
@@ -76,24 +72,9 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			},
+				},
 			wantError: true,
 			errorMsg:  "ssh_key_path is required",
-		},
-		{
-			name: "missing state_s3_bucket",
-			cfg: &Config{
-				AWSProfile:    "test-developers",
-				Region:        "us-east-1",
-				InstanceType:  "m7i.xlarge",
-				SSHPublicKey:  "ssh-ed25519 AAAAC test",
-				SSHKeyPath:    "/home/test/.ssh/key",
-				DeveloperName: "john-dev",
-				StateS3Bucket: "",
-			},
-			wantError: true,
-			errorMsg:  "state_s3_bucket is required",
 		},
 		{
 			name: "missing instance_type",
@@ -104,8 +85,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			},
+				},
 			wantError: true,
 			errorMsg:  "instance_type is required",
 		},
@@ -118,8 +98,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			},
+				},
 			wantError: true,
 			errorMsg:  "ssh_public_key is required",
 		},
@@ -161,8 +140,7 @@ func TestValidateAWSRegion(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			}
+				}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -197,8 +175,7 @@ func TestValidateInstanceType(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			}
+				}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -235,8 +212,7 @@ func TestValidateDeveloperName(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: tt.devName,
-				StateS3Bucket: "bucket",
-			}
+				}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -271,8 +247,7 @@ func TestValidateSSHPublicKey(t *testing.T) {
 				SSHPublicKey:  tt.sshKey,
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				StateS3Bucket: "bucket",
-			}
+				}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -297,7 +272,6 @@ func TestSaveToWithFilePermissions(t *testing.T) {
 		SSHPublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 test@host",
 		SSHKeyPath:    "/home/test/.ssh/key",
 		DeveloperName: "john-dev",
-		StateS3Bucket: "bucket",
 	}
 
 	err := SaveTo(configFile, cfg)
@@ -376,7 +350,6 @@ instance_type: m7i.xlarge
 ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 test@host"
 ssh_key_path: /home/test/.ssh/key
 developer_name: john-dev
-state_s3_bucket: bucket
 `
 	if err := os.WriteFile(configFile, []byte(yamlContent), 0600); err != nil {
 		t.Fatal(err)
@@ -476,7 +449,6 @@ func TestSaveToWriteError(t *testing.T) {
 		SSHPublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 test@host",
 		SSHKeyPath:    "/home/test/.ssh/key",
 		DeveloperName: "john-dev",
-		StateS3Bucket: "bucket",
 	}
 
 	err := SaveTo(filepath.Join(readOnlyDir, "subdir", "config.yaml"), cfg)

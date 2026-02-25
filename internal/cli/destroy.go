@@ -9,7 +9,6 @@ import (
 
 	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
 	"github.com/nbugash-viafoura/clouddesktop/internal/config"
-	"github.com/nbugash-viafoura/clouddesktop/internal/terraform"
 	"github.com/spf13/cobra"
 )
 
@@ -58,48 +57,27 @@ func runDestroy() error {
 	fmt.Println("All data on the EBS volume (repos, Docker images, caches) will be DELETED.")
 	fmt.Println()
 
-	// Check instance state before destroying -- if it's already terminated,
-	// just clean up Terraform state and config.
 	ec2Client, err := vfaws.NewEC2Client(ctx, cfg.AWSProfile, cfg.Region)
 	if err != nil {
 		return err
 	}
 
-	info, err := ec2Client.DescribeInstance(ctx, cfg.InstanceID)
-	if err != nil {
-		fmt.Printf("Warning: could not describe instance: %s\n", err)
-		fmt.Println("Proceeding with Terraform destroy anyway...")
-	} else if info.State == "running" {
-		fmt.Println("Stopping instance before destroying...")
-		if err := ec2Client.StopInstance(ctx, cfg.InstanceID); err != nil {
-			fmt.Printf("Warning: failed to stop instance: %s\n", err)
-		} else {
-			_ = ec2Client.WaitUntilStopped(ctx, cfg.InstanceID)
-		}
-	}
-
-	fmt.Println("Running terraform destroy...")
-
-	tfDir, err := terraformInstanceDir()
+	ssmClient, err := vfaws.NewSSMClient(ctx, cfg.AWSProfile, cfg.Region)
 	if err != nil {
 		return err
 	}
 
-	backendKey := terraform.S3BackendKey(cfg.DeveloperName)
-	runner := terraform.NewRunner(tfDir, cfg.AWSProfile, cfg.Region, backendKey)
+	provisioner := vfaws.NewProvisioner(ec2Client, ssmClient)
 
-	if err := runner.Init(ctx); err != nil {
-		return fmt.Errorf("terraform init failed: %w", err)
+	fmt.Println("Terminating instance and cleaning up resources...")
+	if err := provisioner.Destroy(ctx, cfg.InstanceID, cfg.DeveloperName); err != nil {
+		return fmt.Errorf("destroy failed: %w", err)
 	}
 
-	vars := map[string]string{
-		"developer_name": cfg.DeveloperName,
-		"instance_type":  cfg.InstanceType,
-		"ssh_public_key": cfg.SSHPublicKey,
-		"region":         cfg.Region,
-	}
-	if err := runner.Destroy(ctx, vars); err != nil {
-		return fmt.Errorf("terraform destroy failed: %w", err)
+	if err := vfaws.RemoveSSHConfig(); err != nil {
+		fmt.Printf("Warning: failed to clean up SSH config: %s\n", err)
+	} else {
+		fmt.Println("SSH config cleaned up.")
 	}
 
 	if err := cleanupConfig(); err != nil {

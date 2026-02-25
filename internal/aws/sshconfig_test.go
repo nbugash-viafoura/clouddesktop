@@ -343,6 +343,107 @@ func TestReadSSHConfig_ReadError(t *testing.T) {
 	}
 }
 
+// --- Tests for removeManagedBlock and removeSSHConfigFrom ---
+
+func TestRemoveManagedBlock_RemovesBlock(t *testing.T) {
+	block := sshConfigBeginMarker + "\nHost clouddesktop\n  HostName i-abc\n" + sshConfigEndMarker + "\n"
+	content := "Host bastion\n  User ec2-user\n\n" + block + "\nHost other\n  User admin\n"
+
+	result := removeManagedBlock(content)
+
+	if strings.Contains(result, sshConfigBeginMarker) {
+		t.Error("managed block should be removed")
+	}
+	if strings.Contains(result, "i-abc") {
+		t.Error("managed block content should be removed")
+	}
+	if !strings.Contains(result, "Host bastion") {
+		t.Error("content before block should be preserved")
+	}
+	if !strings.Contains(result, "Host other") {
+		t.Error("content after block should be preserved")
+	}
+}
+
+func TestRemoveManagedBlock_NoBlock(t *testing.T) {
+	content := "Host bastion\n  User ec2-user\n"
+	result := removeManagedBlock(content)
+	if result != content {
+		t.Errorf("content should be unchanged, got:\n%q", result)
+	}
+}
+
+func TestRemoveManagedBlock_EmptyContent(t *testing.T) {
+	result := removeManagedBlock("")
+	if result != "" {
+		t.Errorf("expected empty string, got: %q", result)
+	}
+}
+
+func TestRemoveManagedBlock_OnlyBlock(t *testing.T) {
+	content := sshConfigBeginMarker + "\nHost clouddesktop\n" + sshConfigEndMarker + "\n"
+	result := removeManagedBlock(content)
+	if strings.Contains(result, "clouddesktop") {
+		t.Error("block should be removed entirely")
+	}
+}
+
+func TestRemoveSSHConfigFrom_RemovesBlock(t *testing.T) {
+	tmpDir := t.TempDir()
+	sshDir := filepath.Join(tmpDir, ".ssh")
+	configPath := filepath.Join(sshDir, "config")
+
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	block := renderSSHConfigBlock(testEntry())
+	content := "Host bastion\n  User ec2-user\n\n" + block + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := removeSSHConfigFrom(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	result := string(data)
+	if strings.Contains(result, sshConfigBeginMarker) {
+		t.Error("managed block should be removed from file")
+	}
+	if !strings.Contains(result, "Host bastion") {
+		t.Error("other SSH config should be preserved")
+	}
+}
+
+func TestRemoveSSHConfigFrom_NoFile(t *testing.T) {
+	err := removeSSHConfigFrom("/nonexistent/path/config")
+	if err != nil {
+		t.Fatalf("expected no error for missing file, got: %v", err)
+	}
+}
+
+func TestRemoveSSHConfigFrom_NoBlock(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	content := "Host bastion\n  User ec2-user\n"
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := removeSSHConfigFrom(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	if string(data) != content {
+		t.Error("file should be unchanged when no managed block exists")
+	}
+}
+
 func TestReadSSHConfig_Success(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config")

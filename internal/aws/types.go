@@ -125,11 +125,6 @@ func ErrSSHKeyNotFound(path string) error {
 	return fmt.Errorf("SSH public key not found at %s - generate one with: ssh-keygen -t ed25519 -f ~/.ssh/viafoura_dev", path)
 }
 
-// ErrTerraformNotFound creates an error for missing terraform binary.
-func ErrTerraformNotFound() error {
-	return fmt.Errorf("terraform binary not found - install with: brew install terraform")
-}
-
 // ErrAWSProfileNotFound creates an error for a missing AWS profile.
 func ErrAWSProfileNotFound(profile string) error {
 	return fmt.Errorf("AWS profile '%s' not found - configure it in ~/.aws/config or ~/.aws/credentials", profile)

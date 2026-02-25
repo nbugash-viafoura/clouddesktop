@@ -104,6 +104,57 @@ Host %s
 	)
 }
 
+// RemoveSSHConfig removes the clouddesktop-managed block from ~/.ssh/config.
+// If no managed block exists, this is a no-op.
+func RemoveSSHConfig() error {
+	_, configPath, err := sshConfigPath()
+	if err != nil {
+		return err
+	}
+	return removeSSHConfigFrom(configPath)
+}
+
+// removeSSHConfigFrom contains the core SSH config removal logic, operating on an
+// explicit path rather than the user's home directory. This enables testing.
+func removeSSHConfigFrom(configPath string) error {
+	content, err := readSSHConfig(configPath)
+	if err != nil {
+		return err
+	}
+	if content == "" {
+		return nil
+	}
+
+	updated := removeManagedBlock(content)
+	if updated == content {
+		return nil
+	}
+
+	if err := os.WriteFile(configPath, []byte(updated), 0600); err != nil {
+		return fmt.Errorf("failed to write SSH config: %w", err)
+	}
+	return nil
+}
+
+// removeManagedBlock removes the clouddesktop-managed block from the SSH config content.
+// Returns the content unchanged if no managed block is found.
+func removeManagedBlock(content string) string {
+	beginIdx := strings.Index(content, sshConfigBeginMarker)
+	endIdx := strings.Index(content, sshConfigEndMarker)
+
+	if beginIdx == -1 || endIdx == -1 || endIdx <= beginIdx {
+		return content
+	}
+
+	endOfBlock := endIdx + len(sshConfigEndMarker)
+	if endOfBlock < len(content) && content[endOfBlock] == '\n' {
+		endOfBlock++
+	}
+
+	result := content[:beginIdx] + content[endOfBlock:]
+	return strings.TrimRight(result, "\n") + "\n"
+}
+
 // replaceOrAppendBlock replaces the existing clouddesktop-managed block in content with
 // the new block, or appends the new block if no managed block exists.
 func replaceOrAppendBlock(content, block string) string {

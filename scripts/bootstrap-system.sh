@@ -62,7 +62,42 @@ unzip -q /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install
 rm -rf /tmp/aws /tmp/awscliv2.zip
 
-log "Step 6: Installing SDKMAN and Java 21 (Amazon Corretto)..."
+log "Step 6: Installing Kubernetes tooling (kubectl, helm, k3d, istioctl)..."
+
+log "Installing kubectl..."
+curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl
+chmod 755 /usr/local/bin/kubectl
+
+log "Installing Helm..."
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+log "Installing k3d..."
+curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+
+log "Installing istioctl..."
+curl -fsSL https://istio.io/downloadIstio | sh -
+mv istio-*/bin/istioctl /usr/local/bin/istioctl
+chmod 755 /usr/local/bin/istioctl
+rm -rf istio-*/
+
+log "Verifying Kubernetes tooling..."
+kubectl version --client --output=yaml | head -5
+helm version --short
+k3d version
+istioctl version --remote=false
+
+log "Step 7: Creating default k3d cluster..."
+k3d cluster create clouddesktop \
+  --agents 2 \
+  --k3s-arg "--disable=traefik@server:0" \
+  --wait
+log "k3d cluster 'clouddesktop' created. Configuring kubeconfig for ubuntu user..."
+mkdir -p /home/ubuntu/.kube
+k3d kubeconfig get clouddesktop > /home/ubuntu/.kube/config
+chmod 600 /home/ubuntu/.kube/config
+chown -R ubuntu:ubuntu /home/ubuntu/.kube
+
+log "Step 8: Installing SDKMAN and Java 21 (Amazon Corretto)..."
 su - ubuntu -c '
   set -eo pipefail
   export SDKMAN_DIR="$HOME/.sdkman"
@@ -73,7 +108,7 @@ su - ubuntu -c '
   bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sdk install java 21.0.10-amzn && sdk default java 21.0.10-amzn"
 '
 
-log "Step 7: Installing fnm and Node.js LTS..."
+log "Step 9: Installing fnm and Node.js LTS..."
 su - ubuntu -c '
   set -euo pipefail
   curl -fsSL https://fnm.vercel.app/install | bash
@@ -86,7 +121,7 @@ su - ubuntu -c '
   npm install -g pnpm yarn
 '
 
-log "Step 8: Installing Claude Code CLI..."
+log "Step 10: Installing Claude Code CLI..."
 su - ubuntu -c '
   set -euo pipefail
   export FNM_PATH="$HOME/.local/share/fnm"
@@ -95,7 +130,7 @@ su - ubuntu -c '
   npm install -g @anthropic-ai/claude-code
 '
 
-log "Step 9: Installing zsh and oh-my-zsh..."
+log "Step 11: Installing zsh and oh-my-zsh..."
 chsh -s "$(which zsh)" ubuntu
 
 su - ubuntu -c '
@@ -140,7 +175,7 @@ export SDKMAN_DIR="$HOME/.sdkman"
 ZSHEOF
 chown ubuntu:ubuntu /home/ubuntu/.zshrc
 
-log "Step 10: Verifying SSM Agent installation and status..."
+log "Step 12: Verifying SSM Agent installation and status..."
 if ! systemctl is-active --quiet amazon-ssm-agent; then
   log "SSM Agent not active, installing via snap..."
   snap install amazon-ssm-agent --classic
@@ -150,17 +185,17 @@ else
   log "SSM Agent already active."
 fi
 
-log "Step 11: Installing CloudWatch Agent..."
+log "Step 13: Installing CloudWatch Agent..."
 wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O /tmp/amazon-cloudwatch-agent.deb
 dpkg -i /tmp/amazon-cloudwatch-agent.deb
 rm /tmp/amazon-cloudwatch-agent.deb
 
-log "Step 12: Hardening SSH configuration..."
+log "Step 14: Hardening SSH configuration..."
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 systemctl restart sshd
 
-log "Step 13: Installing clouddesktop auto-stop service..."
+log "Step 15: Installing clouddesktop auto-stop service..."
 
 cat > /usr/local/bin/clouddesktop-autostop <<'AUTOSTOP_SCRIPT'
 #!/bin/bash
@@ -237,8 +272,8 @@ systemctl daemon-reload
 systemctl enable clouddesktop-autostop.timer
 systemctl start clouddesktop-autostop.timer
 
-log "Step 14: Writing bootstrap-dev.sh for developer setup..."
-cat > /home/ubuntu/bootstrap-dev.sh <<'DEVSCRIPT'
+log "Step 16: Writing .bootstrap-dev.sh for developer setup..."
+cat > /home/ubuntu/.bootstrap-dev.sh <<'DEVSCRIPT'
 #!/bin/bash
 # CloudDesktop Developer Bootstrap Script
 # Run manually by the developer after first SSH connection
@@ -301,7 +336,7 @@ if [ -n "${DOTFILES_REPO:-}" ]; then
   fi
 else
   log "DOTFILES_REPO environment variable not set. Skipping dotfiles installation."
-  log "To install dotfiles later, run: DOTFILES_REPO=<your-repo-url> bash bootstrap-dev.sh"
+  log "To install dotfiles later, run: DOTFILES_REPO=<your-repo-url> bash ~/.bootstrap-dev.sh"
 fi
 
 echo ""
@@ -328,11 +363,11 @@ echo ""
 echo "Happy coding!"
 echo "=================================================================================="
 DEVSCRIPT
-chmod +x /home/ubuntu/bootstrap-dev.sh
-chown ubuntu:ubuntu /home/ubuntu/bootstrap-dev.sh
+chmod 555 /home/ubuntu/.bootstrap-dev.sh
+chown root:root /home/ubuntu/.bootstrap-dev.sh
 
-log "Step 15: Marking bootstrap as complete..."
+log "Step 17: Marking bootstrap as complete..."
 touch /var/log/bootstrap-system-complete
 
 log "Bootstrap complete. Instance is ready for developer-specific setup."
-log "Developer should run ~/bootstrap-dev.sh after first SSH connection."
+log "Developer should run ~/.bootstrap-dev.sh after first SSH connection."

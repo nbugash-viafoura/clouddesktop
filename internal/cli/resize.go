@@ -7,7 +7,6 @@ import (
 
 	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
 	"github.com/nbugash-viafoura/clouddesktop/internal/config"
-	"github.com/nbugash-viafoura/clouddesktop/internal/terraform"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +15,7 @@ func NewResizeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resize <instance-type>",
 		Short: "Resize cloud desktop instance type",
-		Long:  "Changes the EC2 instance type (e.g., m7i.2xlarge). Stops the instance if running, applies the change via Terraform, then restarts.",
+		Long:  "Changes the EC2 instance type (e.g., m7i.2xlarge). Stops the instance if running, applies the change, then restarts.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runResize(args[0])
@@ -70,26 +69,8 @@ func runResize(newInstanceType string) error {
 
 	fmt.Printf("Resizing from %s to %s...\n", cfg.InstanceType, newInstanceType)
 
-	tfDir, err := terraformInstanceDir()
-	if err != nil {
-		return err
-	}
-
-	backendKey := terraform.S3BackendKey(cfg.DeveloperName)
-	runner := terraform.NewRunner(tfDir, cfg.AWSProfile, cfg.Region, backendKey)
-
-	if err := runner.Init(ctx); err != nil {
-		return fmt.Errorf("terraform init failed: %w", err)
-	}
-
-	vars := map[string]string{
-		"developer_name": cfg.DeveloperName,
-		"instance_type":  newInstanceType,
-		"ssh_public_key": cfg.SSHPublicKey,
-		"region":         cfg.Region,
-	}
-	if err := runner.Apply(ctx, vars); err != nil {
-		return fmt.Errorf("terraform apply failed: %w", err)
+	if err := ec2Client.ModifyInstanceType(ctx, cfg.InstanceID, newInstanceType); err != nil {
+		return fmt.Errorf("resize failed: %w", err)
 	}
 
 	// Update config with new instance type.
