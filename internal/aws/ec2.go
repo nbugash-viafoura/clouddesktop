@@ -159,18 +159,20 @@ func (c *EC2Client) FindInstanceByDeveloper(ctx context.Context, developerName s
 	}
 
 	for _, reservation := range output.Reservations {
-		for _, inst := range reservation.Instances {
-			info := &InstanceInfo{
-				InstanceID:   aws.ToString(inst.InstanceId),
-				State:        string(inst.State.Name),
-				InstanceType: string(inst.InstanceType),
-				LaunchTime:   inst.LaunchTime,
-			}
-			if inst.PrivateIpAddress != nil {
-				info.PrivateIP = *inst.PrivateIpAddress
-			}
-			return info, nil
+		if len(reservation.Instances) == 0 {
+			continue
 		}
+		inst := reservation.Instances[0]
+		info := &InstanceInfo{
+			InstanceID:   aws.ToString(inst.InstanceId),
+			State:        string(inst.State.Name),
+			InstanceType: string(inst.InstanceType),
+			LaunchTime:   inst.LaunchTime,
+		}
+		if inst.PrivateIpAddress != nil {
+			info.PrivateIP = *inst.PrivateIpAddress
+		}
+		return info, nil
 	}
 
 	return nil, nil
