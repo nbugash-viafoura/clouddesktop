@@ -1,7 +1,7 @@
 #!/bin/bash
 # CloudDesktop Developer Bootstrap Script
 # Run manually by the developer after first SSH connection
-# Make executable with: chmod +x bootstrap-dev.sh
+# Make executable with: chmod +x .bootstrap-dev.sh
 #
 # Prerequisites:
 #   - SSH agent forwarding must be enabled (ForwardAgent yes in SSH config)
@@ -61,7 +61,7 @@ if [ -n "${DOTFILES_REPO:-}" ]; then
   fi
 else
   log "DOTFILES_REPO environment variable not set. Skipping dotfiles installation."
-  log "To install dotfiles later, run: DOTFILES_REPO=<your-repo-url> bash bootstrap-dev.sh"
+  log "To install dotfiles later, run: DOTFILES_REPO=<your-repo-url> bash ~/.bootstrap-dev.sh"
 fi
 
 echo ""

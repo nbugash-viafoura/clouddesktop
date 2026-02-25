@@ -11,7 +11,7 @@ test:
 	go test ./...
 
 # Packages with meaningful unit-testable logic (excludes CLI glue, test infra, and main)
-COVER_PKGS=$(MODULE)/internal/config,$(MODULE)/internal/terraform,$(MODULE)/internal/aws
+COVER_PKGS=$(MODULE)/internal/config,$(MODULE)/internal/aws
 
 test-coverage:
 	go test -coverprofile=coverage.out -coverpkg=$(COVER_PKGS) ./...

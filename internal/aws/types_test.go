@@ -187,20 +187,6 @@ func TestErrSSHKeyNotFound(t *testing.T) {
 	}
 }
 
-// TestErrTerraformNotFound helper.
-func TestErrTerraformNotFound(t *testing.T) {
-	err := ErrTerraformNotFound()
-
-	if err == nil {
-		t.Fatal("ErrTerraformNotFound() returned nil")
-	}
-
-	msg := err.Error()
-	if !strings.Contains(msg, "terraform") || !strings.Contains(msg, "not found") {
-		t.Errorf("Error message = %q, should mention terraform", msg)
-	}
-}
-
 // TestErrAWSProfileNotFound helper.
 func TestErrAWSProfileNotFound(t *testing.T) {
 	err := ErrAWSProfileNotFound("test-terraform")

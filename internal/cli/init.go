@@ -90,9 +90,6 @@ func runInit() error {
 	// Store the private key path (public key path minus .pub) for SSH config
 	cfg.SSHKeyPath = strings.TrimSuffix(keyPath, ".pub")
 
-	// S3 state bucket
-	cfg.StateS3Bucket = "viafoura-clouddesktop-tfstate"
-
 	// Shell config mirror prompt
 	fmt.Println()
 	fmt.Println("clouddesktop can copy your local ~/.zshrc (or ~/.bashrc) to the remote instance so your")

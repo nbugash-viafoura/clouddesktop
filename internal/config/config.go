@@ -20,7 +20,6 @@ type Config struct {
 	SSHKeyPath      string `yaml:"ssh_key_path"`
 	ShellConfigPath string `yaml:"shell_config_path,omitempty"`
 	DeveloperName   string `yaml:"developer_name"`
-	StateS3Bucket   string `yaml:"state_s3_bucket"`
 	InstanceID      string `yaml:"instance_id,omitempty"`
 }
 
@@ -105,10 +104,6 @@ func (c *Config) Validate() error {
 
 	if c.SSHKeyPath == "" {
 		return errors.New("ssh_key_path is required")
-	}
-
-	if c.StateS3Bucket == "" {
-		return errors.New("state_s3_bucket is required")
 	}
 
 	return nil

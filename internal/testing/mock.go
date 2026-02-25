@@ -91,62 +91,6 @@ func (m *MockCloudWatchClient) GetInstanceMetrics(ctx context.Context, instanceI
 	}, nil
 }
 
-// MockTerraformRunner is a test double for terraform.Runner.
-type MockTerraformRunner struct {
-	InitFn     func(ctx context.Context) error
-	ApplyFn    func(ctx context.Context, vars map[string]string) error
-	DestroyFn  func(ctx context.Context, vars map[string]string) error
-	OutputFn   func(ctx context.Context, key string) (string, error)
-	InitCalls  int
-	ApplyCalls int
-	DestroyCalls int
-}
-
-// Init calls the mock function.
-func (m *MockTerraformRunner) Init(ctx context.Context) error {
-	m.InitCalls++
-	if m.InitFn != nil {
-		return m.InitFn(ctx)
-	}
-	return nil
-}
-
-// Apply calls the mock function.
-func (m *MockTerraformRunner) Apply(ctx context.Context, vars map[string]string) error {
-	m.ApplyCalls++
-	if m.ApplyFn != nil {
-		return m.ApplyFn(ctx, vars)
-	}
-	return nil
-}
-
-// Destroy calls the mock function.
-func (m *MockTerraformRunner) Destroy(ctx context.Context, vars map[string]string) error {
-	m.DestroyCalls++
-	if m.DestroyFn != nil {
-		return m.DestroyFn(ctx, vars)
-	}
-	return nil
-}
-
-// Output calls the mock function.
-func (m *MockTerraformRunner) Output(ctx context.Context, key string) (string, error) {
-	if m.OutputFn != nil {
-		return m.OutputFn(ctx, key)
-	}
-	return "", nil
-}
-
-// ValidateBinary is a mock that always succeeds.
-func (m *MockTerraformRunner) ValidateBinary() error {
-	return nil
-}
-
-// ValidateBackendAccess is a mock that always succeeds.
-func (m *MockTerraformRunner) ValidateBackendAccess(ctx context.Context) error {
-	return nil
-}
-
 // TestConfig returns a valid config for testing.
 func TestConfig() *config.Config {
 	return &config.Config{
@@ -157,7 +101,6 @@ func TestConfig() *config.Config {
 		SSHKeyPath:      "/home/test/.ssh/viafoura_dev",
 		ShellConfigPath: "/home/test/.zshrc",
 		DeveloperName:   "john-dev",
-		StateS3Bucket:   "viafoura-clouddesktop-tfstate",
 		InstanceID:      "i-0123456789abcdef0",
 	}
 }
