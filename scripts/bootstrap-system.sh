@@ -283,10 +283,6 @@ cat > /home/ubuntu/.bootstrap-dev.sh <<'DEVSCRIPT'
 # CloudDesktop Developer Bootstrap Script
 # Run manually by the developer after first SSH connection
 #
-# Prerequisites:
-#   - SSH agent forwarding must be enabled (ForwardAgent yes in SSH config)
-#   - Your local SSH key must be added to your GitHub account
-
 set -euo pipefail
 
 log() {
@@ -297,25 +293,7 @@ log "Starting CloudDesktop developer bootstrap..."
 log "This script runs as the ubuntu user and configures your personal development environment."
 echo ""
 
-log "Step 1: Verifying SSH agent forwarding and GitHub access..."
-if ! ssh-add -l &>/dev/null; then
-  log "ERROR: No SSH keys available via agent forwarding."
-  log "Make sure your local SSH agent has your key loaded (ssh-add <your-key>)"
-  log "and that you connected with agent forwarding (ssh -A clouddesktop)."
-  exit 1
-fi
-log "SSH agent has forwarded keys."
-
-if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
-  log "GitHub SSH connection verified via agent forwarding."
-else
-  log "ERROR: GitHub SSH authentication failed."
-  log "Make sure your SSH key is added to your GitHub account at github.com/settings/keys"
-  log "Debug: Run 'ssh-add -l' to see loaded keys, 'ssh -vT git@github.com' to debug."
-  exit 1
-fi
-
-log "Step 2: Configuring Testcontainers..."
+log "Step 1: Configuring Testcontainers..."
 cat > "$HOME/.testcontainers.properties" <<'EOF'
 docker.host=unix:///var/run/docker.sock
 ryuk.disabled=true
@@ -323,7 +301,7 @@ host.override=127.0.0.1
 EOF
 log "Testcontainers configuration written to ~/.testcontainers.properties"
 
-log "Step 3: Checking for optional dotfiles repository..."
+log "Step 2: Checking for optional dotfiles repository..."
 if [ -n "${DOTFILES_REPO:-}" ]; then
   log "DOTFILES_REPO set to: $DOTFILES_REPO"
   if [ ! -d "$HOME/.dotfiles" ]; then
