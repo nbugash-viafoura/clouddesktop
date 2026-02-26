@@ -300,7 +300,7 @@ echo ""
 log "Step 1: Verifying SSH agent forwarding and GitHub access..."
 if ! ssh-add -l &>/dev/null; then
   log "ERROR: No SSH keys available via agent forwarding."
-  log "Make sure your local SSH agent has your key loaded (ssh-add ~/.ssh/viafoura_dev)"
+  log "Make sure your local SSH agent has your key loaded (ssh-add <your-key>)"
   log "and that you connected with agent forwarding (ssh -A clouddesktop)."
   exit 1
 fi

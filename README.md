@@ -75,13 +75,16 @@ session-manager-plugin
 
 ### 3. SSH Key Pair
 
-Generate a dedicated key pair for your cloud desktop:
+`clouddesktop` uses your existing SSH key pair -- the same one you use for GitHub. During `clouddesktop init`, you'll provide the path to your public key (e.g., `~/.ssh/id_ed25519.pub`). The public key is uploaded to AWS during provisioning; the private key stays on your laptop.
+
+Make sure your key is loaded in your SSH agent before connecting:
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/viafoura_dev -C "your-name@clouddesktop"
+ssh-add ~/.ssh/id_ed25519    # or whichever key you use for GitHub
+ssh-add -l                   # verify it's loaded
 ```
 
-This creates `~/.ssh/viafoura_dev` (private) and `~/.ssh/viafoura_dev.pub` (public). The public key is uploaded to AWS during provisioning. The private key stays on your laptop.
+SSH agent forwarding is enabled automatically, so `git clone` and `git push` on the instance authenticate using your local key without copying it to the remote machine.
 
 ## Installation
 
@@ -126,11 +129,12 @@ clouddesktop init
 ```
 
 Prompts for:
-- **Developer name** — lowercase, used in AWS resource naming (e.g., `nico`)
-- **AWS profile** — default: `test-developers`
-- **Region** — default: `us-east-1`
+- **Developer name** — lowercase, used in AWS resource naming (e.g., `john`)
+- **AWS profile** — default: `test-terraform`
 - **Instance type** — default: `m7i.xlarge` (4 vCPU, 16 GB)
-- **SSH public key path** — default: `~/.ssh/viafoura_dev.pub`
+- **SSH public key path** — default: `~/.ssh/id_ed25519.pub`
+
+Region is fixed to `us-east-1`.
 
 Writes configuration to `~/.clouddesktop/config.yaml`.
 
@@ -148,7 +152,7 @@ After the instance is running, `clouddesktop up` automatically writes an SSH con
 Host clouddesktop
   HostName <instance-id>
   User ubuntu
-  IdentityFile ~/.ssh/viafoura_dev
+  IdentityFile ~/.ssh/<your-key>
   ForwardAgent yes
   ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p --profile test-developers --region us-east-1
   ServerAliveInterval 60
@@ -426,26 +430,25 @@ Your SSH key isn't loaded into your local agent. Load it before connecting:
 
 ```bash
 # On your laptop
-ssh-add ~/.ssh/viafoura_dev
+ssh-add ~/.ssh/id_ed25519    # or whichever key you use for GitHub
 
 # Verify it's loaded
 ssh-add -l
-# Should show something like:
-# 256 SHA256:abc123... your-name@clouddesktop (ED25519)
+# Should show your key fingerprint
 ```
 
 Then reconnect to the instance. The key will be forwarded automatically because `ForwardAgent yes` is in the SSH config.
 
 If your key requires a passphrase and you're on macOS, you can add it to Keychain so you don't have to re-enter it every time:
 ```bash
-ssh-add --apple-use-keychain ~/.ssh/viafoura_dev
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
 ```
 
 **`.bootstrap-dev.sh` fails with "GitHub SSH authentication failed"**
 
 Your SSH key is loaded in the agent but not registered with GitHub. Add it:
 
-1. Copy your public key: `cat ~/.ssh/viafoura_dev.pub | pbcopy`
+1. Copy your public key: `cat ~/.ssh/id_ed25519.pub | pbcopy` (use your actual key path)
 2. Go to [github.com/settings/keys](https://github.com/settings/keys)
 3. Click "New SSH key", paste the public key, and save
 
@@ -461,7 +464,7 @@ ssh -T git@github.com
 
 This can happen if your agent lost the key (e.g., after a laptop restart). Re-add it:
 ```bash
-ssh-add ~/.ssh/viafoura_dev
+ssh-add ~/.ssh/id_ed25519    # or whichever key you use for GitHub
 ```
 
 On macOS, keys added without `--apple-use-keychain` don't survive reboots.

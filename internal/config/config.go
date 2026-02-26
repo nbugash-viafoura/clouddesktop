@@ -39,21 +39,37 @@ var validAWSRegions = map[string]bool{
 	"ap-southeast-1": false,
 }
 
-// Valid EC2 instance types (m7i family for clouddesktop)
-var validInstanceTypes = map[string]bool{
-	"m7i.large":    true,
-	"m7i.xlarge":   true,
-	"m7i.2xlarge":  true,
-	"m7i.4xlarge":  true,
-	"m6i.large":    true,
-	"m6i.xlarge":   true,
-	"m6i.2xlarge":  true,
-	"t3.large":     true,
-	"t3.xlarge":    true,
-	"t3.2xlarge":   true,
-	"t4g.large":    true,
-	"t4g.xlarge":   true,
-	"t4g.2xlarge":  true,
+// InstanceTypeOption represents a supported EC2 instance type with a display label.
+type InstanceTypeOption struct {
+	Label string
+	Value string
+}
+
+// ValidInstanceTypes is the single source of truth for supported EC2 instance types (amd64 only).
+var ValidInstanceTypes = []InstanceTypeOption{
+	// m7i family (latest gen, Intel)
+	{Label: "m7i.large   ( 2 vCPU,   8 GB)", Value: "m7i.large"},
+	{Label: "m7i.xlarge  ( 4 vCPU,  16 GB)", Value: "m7i.xlarge"},
+	{Label: "m7i.2xlarge ( 8 vCPU,  32 GB)", Value: "m7i.2xlarge"},
+	{Label: "m7i.4xlarge (16 vCPU,  64 GB)", Value: "m7i.4xlarge"},
+	// m6i family (prev gen, Intel)
+	{Label: "m6i.large   ( 2 vCPU,   8 GB)", Value: "m6i.large"},
+	{Label: "m6i.xlarge  ( 4 vCPU,  16 GB)", Value: "m6i.xlarge"},
+	{Label: "m6i.2xlarge ( 8 vCPU,  32 GB)", Value: "m6i.2xlarge"},
+	// t3 family (burstable, Intel)
+	{Label: "t3.large    ( 2 vCPU,   8 GB)", Value: "t3.large"},
+	{Label: "t3.xlarge   ( 4 vCPU,  16 GB)", Value: "t3.xlarge"},
+	{Label: "t3.2xlarge  ( 8 vCPU,  32 GB)", Value: "t3.2xlarge"},
+}
+
+// isValidInstanceType checks if the given instance type is in the supported list.
+func isValidInstanceType(instanceType string) bool {
+	for _, it := range ValidInstanceTypes {
+		if it.Value == instanceType {
+			return true
+		}
+	}
+	return false
 }
 
 // ConfigPath returns the absolute path to the clouddesktop config file.
@@ -81,7 +97,7 @@ func (c *Config) Validate() error {
 	if c.InstanceType == "" {
 		return errors.New("instance_type is required (default: m7i.xlarge)")
 	}
-	if !validInstanceTypes[c.InstanceType] {
+	if !isValidInstanceType(c.InstanceType) {
 		return fmt.Errorf("instance_type '%s' is not valid (supported: m7i.xlarge, m7i.2xlarge, etc.)", c.InstanceType)
 	}
 
