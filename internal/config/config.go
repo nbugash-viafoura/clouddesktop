@@ -17,9 +17,8 @@ type Config struct {
 	Region          string `yaml:"region"`
 	InstanceType    string `yaml:"instance_type"`
 	SSHPublicKey    string `yaml:"ssh_public_key"`
-	SSHKeyPath      string `yaml:"ssh_key_path"`
-	ShellConfigPath string `yaml:"shell_config_path,omitempty"`
-	DeveloperName   string `yaml:"developer_name"`
+	SSHKeyPath    	string `yaml:"ssh_key_path"`
+	DeveloperName 	string `yaml:"developer_name"`
 	InstanceID      string `yaml:"instance_id,omitempty"`
 }
 
@@ -31,13 +30,13 @@ var (
 // Valid AWS regions (common subset; add more as needed)
 var validAWSRegions = map[string]bool{
 	"us-east-1":      true,
-	"us-east-2":      true,
-	"us-west-1":      true,
-	"us-west-2":      true,
-	"eu-central-1":   true,
-	"eu-west-1":      true,
-	"ap-northeast-1": true,
-	"ap-southeast-1": true,
+	"us-east-2":      false,
+	"us-west-1":      false,
+	"us-west-2":      false,
+	"eu-central-1":   false,
+	"eu-west-1":      false,
+	"ap-northeast-1": false,
+	"ap-southeast-1": false,
 }
 
 // Valid EC2 instance types (m7i family for clouddesktop)

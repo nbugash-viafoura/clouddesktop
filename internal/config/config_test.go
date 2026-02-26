@@ -125,8 +125,8 @@ func TestValidateAWSRegion(t *testing.T) {
 		wantError bool
 	}{
 		{"valid us-east-1", "us-east-1", false},
-		{"valid us-west-2", "us-west-2", false},
-		{"valid eu-west-1", "eu-west-1", false},
+		{"invalid us-west-2", "us-west-2", true},
+		{"invalid eu-west-1", "eu-west-1", true},
 		{"invalid region", "invalid-region", true},
 		{"empty region", "", true},
 	}

@@ -48,7 +48,7 @@ func runInit() error {
 	}
 
 	// AWS profile
-	awsProfile, err := prompt(reader, "AWS profile", "test-developers")
+	awsProfile, err := prompt(reader, "AWS profile", "test-terraform")
 	if err != nil {
 		return err
 	}
@@ -90,36 +90,15 @@ func runInit() error {
 	// Store the private key path (public key path minus .pub) for SSH config
 	cfg.SSHKeyPath = strings.TrimSuffix(keyPath, ".pub")
 
-	// Shell config mirror prompt
-	fmt.Println()
-	fmt.Println("clouddesktop can copy your local ~/.zshrc (or ~/.bashrc) to the remote instance so your")
-	fmt.Println("shell environment matches your local setup. This includes environment variables,")
-	fmt.Println("aliases, and tool configuration (e.g. Docker, Testcontainers, fnm).")
-	fmt.Println()
-	mirror, err := prompt(reader, "Mirror local shell config to remote instance? [y/N]", "n")
-	if err != nil {
-		return err
-	}
-	if strings.ToLower(mirror) == "y" || strings.ToLower(mirror) == "yes" {
-		shellPath, err := prompt(reader, "Path to shell config file", defaultShellConfigPath())
-		if err != nil {
-			return err
-		}
-		shellPath = expandPath(shellPath)
-		if _, err := os.Stat(shellPath); err != nil {
-			return fmt.Errorf("shell config file not found at %s: %w", shellPath, err)
-		}
-		cfg.ShellConfigPath = shellPath
-	} else {
-		fmt.Println()
-		fmt.Println("Skipped. You can set up your shell config manually after SSHing into the instance,")
-		fmt.Println("or run 'clouddesktop destroy --confirm' and re-run 'clouddesktop init' to redo this step.")
-	}
-
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
+	fmt.Println()
+	fmt.Println("NOTICE: This EC2 instance is provisioned under Viafoura's AWS account and is")
+	fmt.Println("intended exclusively for Viafoura engineering work. By continuing, you")
+	fmt.Println("acknowledge that personal or unauthorized use of this resource is prohibited")
+	fmt.Println("per company policy.")
 	fmt.Println()
 	fmt.Printf("Configuration saved to %s\n", config.ConfigPath())
 	fmt.Println("Run 'clouddesktop up' to provision your cloud desktop.")
@@ -165,19 +144,6 @@ func defaultSSHKeyPath() string {
 		return path
 	}
 	return filepath.Join(home, ".ssh", "viafoura_dev.pub")
-}
-
-// defaultShellConfigPath returns the path to the user's likely shell config.
-func defaultShellConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "~/.zshrc"
-	}
-	zshrc := filepath.Join(home, ".zshrc")
-	if _, err := os.Stat(zshrc); err == nil {
-		return zshrc
-	}
-	return filepath.Join(home, ".bashrc")
 }
 
 // expandPath expands ~ to the user's home directory.
