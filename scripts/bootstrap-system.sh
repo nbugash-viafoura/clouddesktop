@@ -46,11 +46,16 @@ usermod -aG docker ubuntu
 log "Step 4: Installing and configuring ECR credential helper..."
 apt-get install -y amazon-ecr-credential-helper
 
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+IDENTITY_DOC=$(curl -s -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" http://169.254.169.254/latest/dynamic/instance-identity/document)
+AWS_ACCOUNT_ID=$(echo "${IDENTITY_DOC}" | jq -r '.accountId')
+AWS_REGION=$(echo "${IDENTITY_DOC}" | jq -r '.region')
+log "Detected AWS Account: ${AWS_ACCOUNT_ID}, Region: ${AWS_REGION}"
 mkdir -p /home/ubuntu/.docker
-cat > /home/ubuntu/.docker/config.json <<'EOF'
+cat > /home/ubuntu/.docker/config.json <<EOF
 {
   "credHelpers": {
-    "218894879100.dkr.ecr.us-east-1.amazonaws.com": "ecr-login"
+    "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com": "ecr-login"
   }
 }
 EOF
@@ -97,18 +102,7 @@ istioctl version --remote=false
 kubectl-argo-rollouts version --short
 su - ubuntu -c 'helm plugin list' | grep unittest
 
-log "Step 7: Creating default k3d cluster..."
-k3d cluster create clouddesktop \
-  --agents 2 \
-  --k3s-arg "--disable=traefik@server:0" \
-  --wait
-log "k3d cluster 'clouddesktop' created. Configuring kubeconfig for ubuntu user..."
-mkdir -p /home/ubuntu/.kube
-k3d kubeconfig get clouddesktop > /home/ubuntu/.kube/config
-chmod 600 /home/ubuntu/.kube/config
-chown -R ubuntu:ubuntu /home/ubuntu/.kube
-
-log "Step 8: Installing SDKMAN and Java 21 (Amazon Corretto)..."
+log "Step 7: Installing SDKMAN and Java 21 (Amazon Corretto)..."
 su - ubuntu -c '
   set -eo pipefail
   export SDKMAN_DIR="$HOME/.sdkman"
@@ -119,7 +113,7 @@ su - ubuntu -c '
   bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sdk install java 21.0.10-amzn && sdk default java 21.0.10-amzn"
 '
 
-log "Step 9: Installing fnm and Node.js LTS..."
+log "Step 8: Installing fnm and Node.js LTS..."
 su - ubuntu -c '
   set -euo pipefail
   curl -fsSL https://fnm.vercel.app/install | bash
@@ -132,7 +126,7 @@ su - ubuntu -c '
   npm install -g pnpm yarn
 '
 
-log "Step 10: Installing Claude Code CLI..."
+log "Step 9: Installing Claude Code CLI..."
 su - ubuntu -c '
   set -euo pipefail
   export FNM_PATH="$HOME/.local/share/fnm"
@@ -141,7 +135,7 @@ su - ubuntu -c '
   npm install -g @anthropic-ai/claude-code
 '
 
-log "Step 11: Installing zsh and oh-my-zsh..."
+log "Step 10: Installing zsh and oh-my-zsh..."
 chsh -s "$(which zsh)" ubuntu
 
 su - ubuntu -c '
@@ -186,7 +180,7 @@ export SDKMAN_DIR="$HOME/.sdkman"
 ZSHEOF
 chown ubuntu:ubuntu /home/ubuntu/.zshrc
 
-log "Step 12: Verifying SSM Agent installation and status..."
+log "Step 11: Verifying SSM Agent installation and status..."
 if ! systemctl is-active --quiet amazon-ssm-agent; then
   log "SSM Agent not active, installing via snap..."
   snap install amazon-ssm-agent --classic
@@ -196,17 +190,17 @@ else
   log "SSM Agent already active."
 fi
 
-log "Step 13: Installing CloudWatch Agent..."
+log "Step 12: Installing CloudWatch Agent..."
 wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O /tmp/amazon-cloudwatch-agent.deb
 dpkg -i /tmp/amazon-cloudwatch-agent.deb
 rm /tmp/amazon-cloudwatch-agent.deb
 
-log "Step 14: Hardening SSH configuration..."
+log "Step 13: Hardening SSH configuration..."
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 systemctl restart ssh
 
-log "Step 15: Installing clouddesktop auto-stop service..."
+log "Step 14: Installing clouddesktop auto-stop service..."
 
 cat > /usr/local/bin/clouddesktop-autostop <<'AUTOSTOP_SCRIPT'
 #!/bin/bash
@@ -283,7 +277,7 @@ systemctl daemon-reload
 systemctl enable clouddesktop-autostop.timer
 systemctl start clouddesktop-autostop.timer
 
-log "Step 16: Writing .bootstrap-dev.sh for developer setup..."
+log "Step 15: Writing .bootstrap-dev.sh for developer setup..."
 cat > /home/ubuntu/.bootstrap-dev.sh <<'DEVSCRIPT'
 #!/bin/bash
 # CloudDesktop Developer Bootstrap Script
@@ -377,7 +371,7 @@ DEVSCRIPT
 chmod 555 /home/ubuntu/.bootstrap-dev.sh
 chown root:root /home/ubuntu/.bootstrap-dev.sh
 
-log "Step 17: Marking bootstrap as complete..."
+log "Step 16: Marking bootstrap as complete..."
 touch /var/log/bootstrap-system-complete
 
 log "Bootstrap complete. Instance is ready for developer-specific setup."

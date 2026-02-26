@@ -98,9 +98,8 @@ func TestConfig() *config.Config {
 		Region:          "us-east-1",
 		InstanceType:    "m7i.xlarge",
 		SSHPublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKlh4pZYi3EZg7OMPKDa1Nt2yw9Z8CZSmjQ2qC8i1nC8 test@example.com",
-		SSHKeyPath:      "/home/test/.ssh/viafoura_dev",
-		ShellConfigPath: "/home/test/.zshrc",
-		DeveloperName:   "john-dev",
+		SSHKeyPath:    "/home/test/.ssh/viafoura_dev",
+		DeveloperName: "john-dev",
 		InstanceID:      "i-0123456789abcdef0",
 	}
 }

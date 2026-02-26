@@ -16,7 +16,7 @@ This Terraform root creates the shared infrastructure for Viafoura's CloudDeskto
 
 - AWS CLI configured with `test-terraform` profile
 - Terraform >= 1.6 installed
-- Access to AWS account `218894879100` (test environment)
+- Access to the target AWS account (with admin/terraform role)
 
 ## Bootstrap Process
 
@@ -29,13 +29,13 @@ Because this root creates its own S3 backend, the initial apply requires a two-s
 2. Initialize and apply with local state:
 
 ```bash
-cd /Users/nonicobugash/Development/Viafoura/toolings/clouddesktop/terraform/shared
+cd terraform/shared
 terraform init
 terraform plan
 terraform apply
 ```
 
-This creates the S3 bucket `viafoura-clouddesktop-tfstate` and DynamoDB table `viafoura-clouddesktop-tfstate-lock`.
+This creates the S3 bucket and DynamoDB table defined in `state_backend.tf`.
 
 ### Step 2: Migrate to S3 Backend
 
@@ -52,7 +52,7 @@ When prompted, confirm the migration. Terraform will copy the local state file t
 3. Verify state is now in S3:
 
 ```bash
-aws s3 ls s3://viafoura-clouddesktop-tfstate/shared/ --profile test-terraform
+aws s3 ls s3://<YOUR_TFSTATE_BUCKET>/shared/ --profile test-terraform
 ```
 
 You should see `terraform.tfstate`.

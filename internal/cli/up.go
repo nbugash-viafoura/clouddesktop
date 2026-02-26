@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
@@ -98,10 +97,6 @@ func runProvision(ctx context.Context, cfg *config.Config) error {
 		fmt.Println("You can check progress: clouddesktop ssh, then 'tail -f /var/log/bootstrap-system.log'")
 	}
 
-	if err := copyShellConfig(cfg); err != nil {
-		fmt.Printf("Warning: failed to copy shell config: %s\n", err)
-	}
-
 	info, err := ec2Client.DescribeInstance(ctx, result.InstanceID)
 	if err != nil {
 		return err
@@ -186,24 +181,6 @@ func writeSSHConfig(ctx context.Context, ec2Client *vfaws.EC2Client, cfg *config
 	}
 
 	fmt.Println("SSH config updated. Connect with: ssh clouddesktop")
-	return nil
-}
-
-// copyShellConfig copies the local shell config to the remote instance if configured.
-func copyShellConfig(cfg *config.Config) error {
-	if cfg.ShellConfigPath == "" {
-		return nil
-	}
-
-	if _, err := os.Stat(cfg.ShellConfigPath); err != nil {
-		return fmt.Errorf("shell config file not found: %w", err)
-	}
-
-	// The shell config will be copied via SCP after the instance is accessible.
-	// Since SSM proxy needs time to be ready after instance start, we note this
-	// for the developer to do manually if the automatic copy fails.
-	fmt.Printf("Shell config at %s will be available for copying after SSH is ready.\n", cfg.ShellConfigPath)
-	fmt.Println("Copy manually with: scp -F ~/.ssh/config " + cfg.ShellConfigPath + " clouddesktop:~/.zshrc")
 	return nil
 }
 

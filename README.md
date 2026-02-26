@@ -131,7 +131,6 @@ Prompts for:
 - **Region** — default: `us-east-1`
 - **Instance type** — default: `m7i.xlarge` (4 vCPU, 16 GB)
 - **SSH public key path** — default: `~/.ssh/viafoura_dev.pub`
-- **Shell config mirror** — optionally copies your local `~/.zshrc` to the remote instance
 
 Writes configuration to `~/.clouddesktop/config.yaml`.
 
@@ -323,14 +322,14 @@ This section covers the one-time shared infrastructure setup. This is done by an
 
 ### Shared Infrastructure (Tier 1)
 
-Tier 1 creates the resources that all developer instances share: IAM instance profile, security group, S3 state bucket, and DynamoDB lock table. All resources are created in the existing Development VPC (`vpc-597ca83c`, `10.3.0.0/16`). Instances deploy into the "Services - B" subnet (`subnet-d3facefb`, us-east-1b). This only needs to be done once.
+Tier 1 creates the resources that all developer instances share: IAM instance profile, security group, S3 state bucket, and DynamoDB lock table. All resources are created in the existing Development VPC (configured in `terraform/shared/vpc.tf`). This only needs to be done once.
 
 **AWS resources created:**
 
 | Resource | Purpose |
 |---|---|
-| S3 bucket (`viafoura-clouddesktop-tfstate`) | Stores Terraform state for shared infrastructure |
-| DynamoDB table (`viafoura-clouddesktop-tfstate-lock`) | Prevents concurrent Terraform operations on shared infra |
+| S3 bucket | Stores Terraform state for shared infrastructure |
+| DynamoDB table | Prevents concurrent Terraform operations on shared infra |
 | IAM role + instance profile (`clouddesktop-developer-instance`) | Grants EC2 instances access to SSM, CloudWatch, and ECR (read-only) |
 | Security group (`clouddesktop-developer-instance`) | Zero inbound rules, all outbound allowed. Created in the Development VPC. Attached to every developer instance. |
 | SSM parameters (4) | Stores SG ID, instance profile name, VPC ID, and subnet ID for the CLI to reference at provisioning time |
@@ -387,7 +386,7 @@ docker info                    # Docker running, no permission errors
 java -version                  # Java 21
 node --version                 # Node.js LTS
 claude --version               # Claude Code CLI
-docker pull 218894879100.dkr.ecr.us-east-1.amazonaws.com/<any-service>  # ECR pull without login
+docker pull <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/<any-service>  # ECR pull without login
 ```
 
 ### Tearing Down Shared Infrastructure
