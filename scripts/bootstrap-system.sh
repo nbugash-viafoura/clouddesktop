@@ -95,7 +95,7 @@ helm version --short
 k3d version
 istioctl version --remote=false
 kubectl-argo-rollouts version --short
-su - ubuntu -c 'helm unittest --help' | head -1
+su - ubuntu -c 'helm plugin list' | grep unittest
 
 log "Step 7: Creating default k3d cluster..."
 k3d cluster create clouddesktop \
