@@ -62,7 +62,7 @@ unzip -q /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install
 rm -rf /tmp/aws /tmp/awscliv2.zip
 
-log "Step 6: Installing Kubernetes tooling (kubectl, helm, k3d, istioctl)..."
+log "Step 6: Installing Kubernetes tooling (kubectl, helm, k3d, istioctl, kubectl-argo-rollouts, helm-unittest)..."
 
 log "Installing kubectl..."
 curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl
@@ -80,11 +80,22 @@ mv istio-*/bin/istioctl /usr/local/bin/istioctl
 chmod 755 /usr/local/bin/istioctl
 rm -rf istio-*/
 
+log "Installing kubectl-argo-rollouts..."
+curl -fsSL -o /tmp/kubectl-argo-rollouts-linux-amd64 \
+  "https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64"
+chmod 755 /tmp/kubectl-argo-rollouts-linux-amd64
+mv /tmp/kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+
+log "Installing Helm unittest plugin..."
+su - ubuntu -c 'helm plugin install https://github.com/helm-unittest/helm-unittest'
+
 log "Verifying Kubernetes tooling..."
 kubectl version --client --output=yaml | head -5
 helm version --short
 k3d version
 istioctl version --remote=false
+kubectl-argo-rollouts version --short
+su - ubuntu -c 'helm unittest --help' | head -1
 
 log "Step 7: Creating default k3d cluster..."
 k3d cluster create clouddesktop \
@@ -193,7 +204,7 @@ rm /tmp/amazon-cloudwatch-agent.deb
 log "Step 14: Hardening SSH configuration..."
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
-systemctl restart sshd
+systemctl restart ssh
 
 log "Step 15: Installing clouddesktop auto-stop service..."
 
