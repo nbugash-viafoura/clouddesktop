@@ -122,7 +122,7 @@ func ErrSessionExpired() error {
 
 // ErrSSHKeyNotFound creates an error for a missing SSH key file.
 func ErrSSHKeyNotFound(path string) error {
-	return fmt.Errorf("SSH public key not found at %s - generate one with: ssh-keygen -t ed25519 -f ~/.ssh/viafoura_dev", path)
+	return fmt.Errorf("SSH public key not found at %s - generate one with: ssh-keygen -t ed25519", path)
 }
 
 // ErrAWSProfileNotFound creates an error for a missing AWS profile.
