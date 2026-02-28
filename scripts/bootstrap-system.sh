@@ -204,7 +204,7 @@ log "Step 14: Installing clouddesktop auto-stop service..."
 
 cat > /usr/local/bin/clouddesktop-autostop <<'AUTOSTOP_SCRIPT'
 #!/bin/bash
-# clouddesktop-autostop: Shuts down the instance after 4 hours of SSH inactivity.
+# clouddesktop-autostop: Shuts down the instance after 4 hours of inactivity.
 # Invoked every 15 minutes by clouddesktop-autostop.timer.
 
 set -euo pipefail
@@ -218,15 +218,40 @@ log() {
   logger -t "$LOG_TAG" "$*"
 }
 
+# has_active_sessions returns 0 (true) if any activity signal is detected.
+has_active_sessions() {
+  # Signal 1: Established SSH connections (kernel TCP state -- most reliable)
+  local ssh_conn_count
+  ssh_conn_count=$(ss -tnp state established '( sport = :22 )' | tail -n +2 | wc -l)
+  if [[ "$ssh_conn_count" -gt 0 ]]; then
+    log "Active SSH connections detected ($ssh_conn_count)."
+    return 0
+  fi
+
+  # Signal 2: Login sessions in utmp
+  local login_count
+  login_count=$(who | grep -c "pts/" || true)
+  if [[ "$login_count" -gt 0 ]]; then
+    log "Active login sessions detected ($login_count)."
+    return 0
+  fi
+
+  # Signal 3: Detached tmux or screen sessions
+  if pgrep -x tmux >/dev/null 2>&1 || pgrep -x screen >/dev/null 2>&1; then
+    log "Active tmux/screen session detected."
+    return 0
+  fi
+
+  return 1
+}
+
 if [[ ! -f "$SENTINEL" ]]; then
   log "Bootstrap not yet complete. Skipping idle check."
   exit 0
 fi
 
-ssh_session_count=$(who | grep -c "pts/" || true)
-
-if [[ "$ssh_session_count" -gt 0 ]]; then
-  log "Active SSH sessions detected ($ssh_session_count). Resetting idle counter."
+if has_active_sessions; then
+  log "Resetting idle counter."
   echo 0 > "$COUNTER_FILE"
   exit 0
 fi
@@ -239,7 +264,7 @@ fi
 new_count=$((current_count + 1))
 echo "$new_count" > "$COUNTER_FILE"
 
-log "No active SSH sessions. Idle check $new_count/$IDLE_THRESHOLD."
+log "No active sessions. Idle check $new_count/$IDLE_THRESHOLD."
 
 if [[ "$new_count" -ge "$IDLE_THRESHOLD" ]]; then
   log "Idle threshold reached ($IDLE_THRESHOLD consecutive checks, 4 hours). Initiating shutdown."
