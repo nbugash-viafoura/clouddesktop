@@ -1,14 +1,17 @@
 package aws
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestRenderSSHConfigBlock(t *testing.T) {
-	entry := SSHConfigEntry{
+const testProxyScriptPath = "/home/dev/.ssh/clouddesktop-ssm-proxy.sh"
+
+func testEntry() SSHConfigEntry {
+	return SSHConfigEntry{
 		HostAlias:    "clouddesktop",
 		InstanceID:   "i-0abc123def456",
 		User:         "ubuntu",
@@ -16,10 +19,21 @@ func TestRenderSSHConfigBlock(t *testing.T) {
 		AWSProfile:   "test-developers",
 		Region:       "us-east-1",
 	}
+}
 
-	block := renderSSHConfigBlock(entry)
+func testDeps() SSMProxyDeps {
+	return SSMProxyDeps{
+		AWSPath:                 "/usr/local/bin/aws",
+		SessionManagerPluginDir: "/opt/homebrew/bin",
+	}
+}
 
-	// Must be wrapped in markers
+// --- renderSSHConfigBlock tests ---
+
+func TestRenderSSHConfigBlock(t *testing.T) {
+	entry := testEntry()
+	block := renderSSHConfigBlock(entry, testProxyScriptPath)
+
 	if !strings.HasPrefix(block, sshConfigBeginMarker) {
 		t.Errorf("block should start with begin marker, got:\n%s", block)
 	}
@@ -27,7 +41,6 @@ func TestRenderSSHConfigBlock(t *testing.T) {
 		t.Errorf("block should end with end marker, got:\n%s", block)
 	}
 
-	// Verify key fields appear in the output
 	checks := []struct {
 		label, want string
 	}{
@@ -36,8 +49,9 @@ func TestRenderSSHConfigBlock(t *testing.T) {
 		{"User", "User ubuntu"},
 		{"IdentityFile", "IdentityFile /home/dev/.ssh/id_ed25519"},
 		{"ForwardAgent", "ForwardAgent yes"},
-		{"ProxyCommand profile", "--profile test-developers"},
-		{"ProxyCommand region", "--region us-east-1"},
+		{"ProxyCommand script path", "ProxyCommand " + testProxyScriptPath},
+		{"ProxyCommand %h", "%h"},
+		{"ProxyCommand %p", "%p"},
 		{"ServerAliveInterval", "ServerAliveInterval 60"},
 		{"StrictHostKeyChecking", "StrictHostKeyChecking accept-new"},
 	}
@@ -46,15 +60,159 @@ func TestRenderSSHConfigBlock(t *testing.T) {
 			t.Errorf("block missing %s (%q):\n%s", c.label, c.want, block)
 		}
 	}
+}
 
-	// ProxyCommand should use literal %h and %p (SSH placeholders), not Go fmt verbs
-	if !strings.Contains(block, "--target %h") {
-		t.Error("ProxyCommand should contain literal %h for SSH host substitution")
-	}
-	if !strings.Contains(block, "portNumber=%p") {
-		t.Errorf("ProxyCommand should contain literal SSH port placeholder, got:\n%s", block)
+func TestRenderSSHConfigBlock_NoInlineAWSCommand(t *testing.T) {
+	block := renderSSHConfigBlock(testEntry(), testProxyScriptPath)
+	if strings.Contains(block, "aws ssm start-session") {
+		t.Error("ProxyCommand should reference the proxy script, not inline aws ssm start-session")
 	}
 }
+
+// --- renderProxyScript tests ---
+
+func TestRenderProxyScript(t *testing.T) {
+	deps := testDeps()
+	entry := testEntry()
+	script := renderProxyScript(deps, entry)
+
+	checks := []struct {
+		label, want string
+	}{
+		{"shebang", "#!/bin/bash"},
+		{"session-manager-plugin dir in PATH", "/opt/homebrew/bin"},
+		{"aws dir in PATH", "/usr/local/bin"},
+		{"absolute aws path", "/usr/local/bin/aws ssm start-session"},
+		{"target arg", `--target "$1"`},
+		{"port arg", `"portNumber=$2"`},
+		{"profile", "--profile test-developers"},
+		{"region", "--region us-east-1"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(script, c.want) {
+			t.Errorf("script missing %s (%q):\n%s", c.label, c.want, script)
+		}
+	}
+}
+
+// --- resolveSSMProxyDepsUsing tests ---
+
+func TestResolveSSMProxyDepsUsing_Success(t *testing.T) {
+	lookPath := func(name string) (string, error) {
+		switch name {
+		case "aws":
+			return "/usr/local/bin/aws", nil
+		case "session-manager-plugin":
+			return "/opt/homebrew/bin/session-manager-plugin", nil
+		default:
+			return "", fmt.Errorf("not found: %s", name)
+		}
+	}
+
+	deps, err := resolveSSMProxyDepsUsing(lookPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deps.AWSPath != "/usr/local/bin/aws" {
+		t.Errorf("AWSPath = %q, want /usr/local/bin/aws", deps.AWSPath)
+	}
+	if deps.SessionManagerPluginDir != "/opt/homebrew/bin" {
+		t.Errorf("SessionManagerPluginDir = %q, want /opt/homebrew/bin", deps.SessionManagerPluginDir)
+	}
+}
+
+func TestResolveSSMProxyDepsUsing_MissingAWS(t *testing.T) {
+	lookPath := func(name string) (string, error) {
+		return "", fmt.Errorf("not found: %s", name)
+	}
+
+	_, err := resolveSSMProxyDepsUsing(lookPath)
+	if err == nil {
+		t.Fatal("expected error when aws is not found")
+	}
+	if !strings.Contains(err.Error(), "aws CLI not found") {
+		t.Errorf("error = %q, want to contain 'aws CLI not found'", err)
+	}
+}
+
+func TestResolveSSMProxyDepsUsing_MissingSMP(t *testing.T) {
+	lookPath := func(name string) (string, error) {
+		if name == "aws" {
+			return "/usr/local/bin/aws", nil
+		}
+		return "", fmt.Errorf("not found: %s", name)
+	}
+
+	_, err := resolveSSMProxyDepsUsing(lookPath)
+	if err == nil {
+		t.Fatal("expected error when session-manager-plugin is not found")
+	}
+	if !strings.Contains(err.Error(), "session-manager-plugin not found") {
+		t.Errorf("error = %q, want to contain 'session-manager-plugin not found'", err)
+	}
+}
+
+// --- writeProxyScriptTo tests ---
+
+func TestWriteProxyScriptTo(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "proxy.sh")
+
+	err := writeProxyScriptTo(scriptPath, testDeps(), testEntry())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("failed to read script: %v", err)
+	}
+	if !strings.HasPrefix(string(data), "#!/bin/bash") {
+		t.Error("script should start with shebang")
+	}
+
+	info, _ := os.Stat(scriptPath)
+	if info.Mode().Perm() != 0755 {
+		t.Errorf("file permissions = %o, want 0755", info.Mode().Perm())
+	}
+}
+
+func TestWriteProxyScriptTo_WriteError(t *testing.T) {
+	err := writeProxyScriptTo("/dev/null/impossible/proxy.sh", testDeps(), testEntry())
+	if err == nil {
+		t.Fatal("expected error for impossible path")
+	}
+	if !strings.Contains(err.Error(), "failed to write SSM proxy script") {
+		t.Errorf("error = %q, want to contain 'failed to write SSM proxy script'", err)
+	}
+}
+
+// --- removeProxyScript tests ---
+
+func TestRemoveProxyScript_ExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "proxy.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := removeProxyScript(scriptPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
+		t.Error("script should be removed")
+	}
+}
+
+func TestRemoveProxyScript_NonExistent(t *testing.T) {
+	err := removeProxyScript("/nonexistent/proxy.sh")
+	if err != nil {
+		t.Fatalf("expected no error for missing file, got: %v", err)
+	}
+}
+
+// --- replaceOrAppendBlock tests ---
 
 func TestReplaceOrAppendBlock_EmptyContent(t *testing.T) {
 	block := "# BEGIN clouddesktop managed block\nHost test\n# END clouddesktop managed block"
@@ -75,11 +233,9 @@ func TestReplaceOrAppendBlock_AppendToExisting(t *testing.T) {
 
 	result := replaceOrAppendBlock(existing, block)
 
-	// Original content preserved
 	if !strings.HasPrefix(result, "Host bastion") {
 		t.Errorf("should preserve existing content at the start:\n%s", result)
 	}
-	// New block appended
 	if !strings.Contains(result, sshConfigBeginMarker) {
 		t.Error("should contain the new managed block")
 	}
@@ -91,7 +247,6 @@ func TestReplaceOrAppendBlock_AppendAddsNewlineIfMissing(t *testing.T) {
 
 	result := replaceOrAppendBlock(existing, block)
 
-	// Should not smash the block onto the last line of existing content
 	idx := strings.Index(result, sshConfigBeginMarker)
 	if idx > 0 && result[idx-1] != '\n' {
 		t.Error("should insert a newline separator before the appended block")
@@ -105,66 +260,50 @@ func TestReplaceOrAppendBlock_ReplaceExistingBlock(t *testing.T) {
 
 	result := replaceOrAppendBlock(existing, newBlock)
 
-	// Old content gone
 	if strings.Contains(result, "i-old") {
 		t.Error("old block content should be replaced")
 	}
-	// New content present
 	if !strings.Contains(result, "i-new") {
 		t.Error("new block content should be present")
 	}
-	// Surrounding content preserved
 	if !strings.Contains(result, "Host bastion") {
 		t.Error("content before the block should be preserved")
 	}
 	if !strings.Contains(result, "Host other") {
 		t.Error("content after the block should be preserved")
 	}
-	// Only one begin marker (no duplication)
 	if strings.Count(result, sshConfigBeginMarker) != 1 {
 		t.Errorf("should have exactly one begin marker, got %d", strings.Count(result, sshConfigBeginMarker))
 	}
 }
 
 func TestReplaceOrAppendBlock_ReplaceDoesNotAccumulateBlankLines(t *testing.T) {
-	// Simulate replacing multiple times -- each replace should not add extra blank lines
 	content := "Host bastion\n  User ec2-user\n"
 	block := sshConfigBeginMarker + "\nHost cd\n" + sshConfigEndMarker
 
-	// Apply three times
 	content = replaceOrAppendBlock(content, block)
 	content = replaceOrAppendBlock(content, block)
 	content = replaceOrAppendBlock(content, block)
 
-	// Should never have more than 2 consecutive newlines
 	if strings.Contains(content, "\n\n\n") {
 		t.Errorf("should not accumulate blank lines after repeated replacements:\n%q", content)
 	}
 }
 
-// --- Filesystem tests for writeSSHConfigTo ---
+// --- Filesystem tests for writeSSHConfigWithProxy ---
 
-func testEntry() SSHConfigEntry {
-	return SSHConfigEntry{
-		HostAlias:    "clouddesktop",
-		InstanceID:   "i-0abc123def456",
-		User:         "ubuntu",
-		IdentityFile: "/home/dev/.ssh/id_ed25519",
-		AWSProfile:   "test-developers",
-		Region:       "us-east-1",
-	}
-}
-
-func TestWriteSSHConfigTo_CreatesNewFile(t *testing.T) {
+func TestWriteSSHConfigWithProxy_CreatesNewFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	sshDir := filepath.Join(tmpDir, ".ssh")
 	configPath := filepath.Join(sshDir, "config")
+	scriptPath := filepath.Join(sshDir, proxyScriptName)
 
-	err := writeSSHConfigTo(sshDir, configPath, testEntry())
+	err := writeSSHConfigWithProxy(sshDir, configPath, scriptPath, testDeps(), testEntry())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Verify SSH config
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("failed to read config file: %v", err)
@@ -176,20 +315,39 @@ func TestWriteSSHConfigTo_CreatesNewFile(t *testing.T) {
 	if !strings.Contains(content, sshConfigBeginMarker) {
 		t.Error("config should contain begin marker")
 	}
+	if !strings.Contains(content, scriptPath) {
+		t.Errorf("config should reference proxy script path %q", scriptPath)
+	}
+	if strings.Contains(content, "aws ssm start-session") {
+		t.Error("config should not contain inline aws ssm command")
+	}
 
-	// Verify file permissions
 	info, _ := os.Stat(configPath)
 	if info.Mode().Perm() != 0600 {
-		t.Errorf("file permissions = %o, want 0600", info.Mode().Perm())
+		t.Errorf("config permissions = %o, want 0600", info.Mode().Perm())
+	}
+
+	// Verify proxy script
+	scriptData, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("failed to read proxy script: %v", err)
+	}
+	if !strings.HasPrefix(string(scriptData), "#!/bin/bash") {
+		t.Error("proxy script should start with shebang")
+	}
+	scriptInfo, _ := os.Stat(scriptPath)
+	if scriptInfo.Mode().Perm() != 0755 {
+		t.Errorf("script permissions = %o, want 0755", scriptInfo.Mode().Perm())
 	}
 }
 
-func TestWriteSSHConfigTo_CreatesSSHDirectory(t *testing.T) {
+func TestWriteSSHConfigWithProxy_CreatesSSHDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	sshDir := filepath.Join(tmpDir, "nested", ".ssh")
 	configPath := filepath.Join(sshDir, "config")
+	scriptPath := filepath.Join(sshDir, proxyScriptName)
 
-	err := writeSSHConfigTo(sshDir, configPath, testEntry())
+	err := writeSSHConfigWithProxy(sshDir, configPath, scriptPath, testDeps(), testEntry())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -203,10 +361,11 @@ func TestWriteSSHConfigTo_CreatesSSHDirectory(t *testing.T) {
 	}
 }
 
-func TestWriteSSHConfigTo_UpdatesExistingFile(t *testing.T) {
+func TestWriteSSHConfigWithProxy_UpdatesExistingFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	sshDir := filepath.Join(tmpDir, ".ssh")
 	configPath := filepath.Join(sshDir, "config")
+	scriptPath := filepath.Join(sshDir, proxyScriptName)
 
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		t.Fatal(err)
@@ -216,7 +375,7 @@ func TestWriteSSHConfigTo_UpdatesExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := writeSSHConfigTo(sshDir, configPath, testEntry())
+	err := writeSSHConfigWithProxy(sshDir, configPath, scriptPath, testDeps(), testEntry())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -231,23 +390,24 @@ func TestWriteSSHConfigTo_UpdatesExistingFile(t *testing.T) {
 	}
 }
 
-func TestWriteSSHConfigTo_ReplacesExistingBlock(t *testing.T) {
+func TestWriteSSHConfigWithProxy_ReplacesExistingBlock(t *testing.T) {
 	tmpDir := t.TempDir()
 	sshDir := filepath.Join(tmpDir, ".ssh")
 	configPath := filepath.Join(sshDir, "config")
+	scriptPath := filepath.Join(sshDir, proxyScriptName)
 
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	oldEntry := testEntry()
 	oldEntry.InstanceID = "i-old-instance"
-	oldBlock := renderSSHConfigBlock(oldEntry)
+	oldBlock := renderSSHConfigBlock(oldEntry, scriptPath)
 	existing := "Host bastion\n  User ec2-user\n\n" + oldBlock + "\n"
 	if err := os.WriteFile(configPath, []byte(existing), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	err := writeSSHConfigTo(sshDir, configPath, testEntry())
+	err := writeSSHConfigWithProxy(sshDir, configPath, scriptPath, testDeps(), testEntry())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -265,9 +425,8 @@ func TestWriteSSHConfigTo_ReplacesExistingBlock(t *testing.T) {
 	}
 }
 
-func TestWriteSSHConfigTo_MkdirError(t *testing.T) {
-	// Use /dev/null as the parent to force MkdirAll failure.
-	err := writeSSHConfigTo("/dev/null/impossible", "/dev/null/impossible/config", testEntry())
+func TestWriteSSHConfigWithProxy_MkdirError(t *testing.T) {
+	err := writeSSHConfigWithProxy("/dev/null/impossible", "/dev/null/impossible/config", "/dev/null/impossible/proxy.sh", testDeps(), testEntry())
 	if err == nil {
 		t.Fatal("expected error for impossible directory")
 	}
@@ -276,10 +435,11 @@ func TestWriteSSHConfigTo_MkdirError(t *testing.T) {
 	}
 }
 
-func TestWriteSSHConfigTo_WriteFileError(t *testing.T) {
+func TestWriteSSHConfigWithProxy_WriteFileError(t *testing.T) {
 	tmpDir := t.TempDir()
 	sshDir := filepath.Join(tmpDir, ".ssh")
 	configPath := filepath.Join(sshDir, "config")
+	scriptPath := filepath.Join(sshDir, proxyScriptName)
 
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		t.Fatal(err)
@@ -287,13 +447,12 @@ func TestWriteSSHConfigTo_WriteFileError(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("existing"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	// Remove write permission on the file itself.
 	if err := os.Chmod(configPath, 0400); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(configPath, 0600) })
 
-	err := writeSSHConfigTo(sshDir, configPath, testEntry())
+	err := writeSSHConfigWithProxy(sshDir, configPath, scriptPath, testDeps(), testEntry())
 	if err == nil {
 		t.Fatal("expected error writing to read-only file")
 	}
@@ -302,16 +461,12 @@ func TestWriteSSHConfigTo_WriteFileError(t *testing.T) {
 	}
 }
 
+// --- sshConfigPath / readSSHConfig tests ---
+
 func TestSSHConfigPath(t *testing.T) {
 	sshDir, configPath, err := sshConfigPath()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if sshDir == "" {
-		t.Error("sshDir should not be empty")
-	}
-	if configPath == "" {
-		t.Error("configPath should not be empty")
 	}
 	if !strings.HasSuffix(sshDir, ".ssh") {
 		t.Errorf("sshDir = %q, want to end with .ssh", sshDir)
@@ -332,7 +487,6 @@ func TestReadSSHConfig_FileNotExist(t *testing.T) {
 }
 
 func TestReadSSHConfig_ReadError(t *testing.T) {
-	// Use a directory path instead of a file to trigger a non-NotExist read error.
 	tmpDir := t.TempDir()
 	_, err := readSSHConfig(tmpDir)
 	if err == nil {
@@ -343,7 +497,24 @@ func TestReadSSHConfig_ReadError(t *testing.T) {
 	}
 }
 
-// --- Tests for removeManagedBlock and removeSSHConfigFrom ---
+func TestReadSSHConfig_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	expected := "Host test\n  User admin\n"
+	if err := os.WriteFile(configPath, []byte(expected), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := readSSHConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if content != expected {
+		t.Errorf("content = %q, want %q", content, expected)
+	}
+}
+
+// --- removeManagedBlock and removeSSHConfigFrom tests ---
 
 func TestRemoveManagedBlock_RemovesBlock(t *testing.T) {
 	block := sshConfigBeginMarker + "\nHost clouddesktop\n  HostName i-abc\n" + sshConfigEndMarker + "\n"
@@ -397,7 +568,7 @@ func TestRemoveSSHConfigFrom_RemovesBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	block := renderSSHConfigBlock(testEntry())
+	block := renderSSHConfigBlock(testEntry(), "/tmp/proxy.sh")
 	content := "Host bastion\n  User ec2-user\n\n" + block + "\n"
 	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
 		t.Fatal(err)
@@ -441,22 +612,5 @@ func TestRemoveSSHConfigFrom_NoBlock(t *testing.T) {
 	data, _ := os.ReadFile(configPath)
 	if string(data) != content {
 		t.Error("file should be unchanged when no managed block exists")
-	}
-}
-
-func TestReadSSHConfig_Success(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config")
-	expected := "Host test\n  User admin\n"
-	if err := os.WriteFile(configPath, []byte(expected), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	content, err := readSSHConfig(configPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if content != expected {
-		t.Errorf("content = %q, want %q", content, expected)
 	}
 }
