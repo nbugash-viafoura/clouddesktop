@@ -3,6 +3,7 @@ package aws
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -10,7 +11,14 @@ import (
 const (
 	sshConfigBeginMarker = "# BEGIN clouddesktop managed block"
 	sshConfigEndMarker   = "# END clouddesktop managed block"
+	proxyScriptName      = "clouddesktop-ssm-proxy.sh"
 )
+
+// SSMProxyDeps holds the resolved paths for binaries needed by the SSM proxy script.
+type SSMProxyDeps struct {
+	AWSPath                  string // absolute path to aws CLI
+	SessionManagerPluginDir  string // directory containing session-manager-plugin
+}
 
 // SSHConfigEntry represents the SSH config block for a cloud desktop instance.
 type SSHConfigEntry struct {
@@ -22,24 +30,90 @@ type SSHConfigEntry struct {
 	Region       string
 }
 
+// resolveSSMProxyDeps locates the aws CLI and session-manager-plugin binaries
+// on the current machine. It returns an error if either cannot be found.
+func resolveSSMProxyDeps() (SSMProxyDeps, error) {
+	return resolveSSMProxyDepsUsing(exec.LookPath)
+}
+
+// resolveSSMProxyDepsUsing is the testable core that accepts a custom lookPath function.
+func resolveSSMProxyDepsUsing(lookPath func(string) (string, error)) (SSMProxyDeps, error) {
+	awsPath, err := lookPath("aws")
+	if err != nil {
+		return SSMProxyDeps{}, fmt.Errorf("aws CLI not found in PATH: %w", err)
+	}
+
+	smpPath, err := lookPath("session-manager-plugin")
+	if err != nil {
+		return SSMProxyDeps{}, fmt.Errorf("session-manager-plugin not found in PATH (install via 'brew install session-manager-plugin' on macOS): %w", err)
+	}
+
+	return SSMProxyDeps{
+		AWSPath:                 awsPath,
+		SessionManagerPluginDir: filepath.Dir(smpPath),
+	}, nil
+}
+
+// renderProxyScript produces the shell script content for the SSM proxy.
+func renderProxyScript(deps SSMProxyDeps, entry SSHConfigEntry) string {
+	awsDir := filepath.Dir(deps.AWSPath)
+	return fmt.Sprintf(`#!/bin/bash
+export PATH="%s:%s:$PATH"
+%s ssm start-session \
+  --target "$1" \
+  --document-name AWS-StartSSHSession \
+  --parameters "portNumber=$2" \
+  --profile %s \
+  --region %s
+`, deps.SessionManagerPluginDir, awsDir, deps.AWSPath, entry.AWSProfile, entry.Region)
+}
+
+// writeProxyScriptTo writes the proxy script to the given path with mode 0755.
+func writeProxyScriptTo(scriptPath string, deps SSMProxyDeps, entry SSHConfigEntry) error {
+	content := renderProxyScript(deps, entry)
+	if err := os.WriteFile(scriptPath, []byte(content), 0755); err != nil {
+		return fmt.Errorf("failed to write SSM proxy script: %w", err)
+	}
+	return nil
+}
+
+// removeProxyScript removes the managed proxy script if it exists.
+func removeProxyScript(scriptPath string) error {
+	if err := os.Remove(scriptPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove SSM proxy script: %w", err)
+	}
+	return nil
+}
+
 // WriteSSHConfig writes or updates the SSH config entry for the cloud desktop.
-// It reads ~/.ssh/config, replaces the existing clouddesktop-managed block (identified
-// by marker comments) if one exists, or appends a new block if none is found.
-// The file is written with mode 0600 and the .ssh directory is created with
+// It resolves the absolute paths of aws and session-manager-plugin, generates
+// a proxy wrapper script at ~/.ssh/clouddesktop-ssm-proxy.sh, then writes the
+// SSH config block referencing that script. The .ssh directory is created with
 // mode 0700 if it does not already exist.
 func WriteSSHConfig(entry SSHConfigEntry) error {
 	sshDir, configPath, err := sshConfigPath()
 	if err != nil {
 		return err
 	}
-	return writeSSHConfigTo(sshDir, configPath, entry)
+
+	deps, err := resolveSSMProxyDeps()
+	if err != nil {
+		return err
+	}
+
+	scriptPath := filepath.Join(sshDir, proxyScriptName)
+	return writeSSHConfigWithProxy(sshDir, configPath, scriptPath, deps, entry)
 }
 
-// writeSSHConfigTo contains the core SSH config write logic, operating on explicit paths
-// rather than the user's home directory. This enables testing with temp directories.
-func writeSSHConfigTo(sshDir, configPath string, entry SSHConfigEntry) error {
+// writeSSHConfigWithProxy contains the core logic for writing both the proxy
+// script and the SSH config block. Accepts explicit paths for testability.
+func writeSSHConfigWithProxy(sshDir, configPath, scriptPath string, deps SSMProxyDeps, entry SSHConfigEntry) error {
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		return fmt.Errorf("failed to create .ssh directory: %w", err)
+	}
+
+	if err := writeProxyScriptTo(scriptPath, deps, entry); err != nil {
+		return err
 	}
 
 	existing, err := readSSHConfig(configPath)
@@ -47,7 +121,7 @@ func writeSSHConfigTo(sshDir, configPath string, entry SSHConfigEntry) error {
 		return err
 	}
 
-	block := renderSSHConfigBlock(entry)
+	block := renderSSHConfigBlock(entry, scriptPath)
 	updated := replaceOrAppendBlock(existing, block)
 
 	if err := os.WriteFile(configPath, []byte(updated), 0600); err != nil {
@@ -81,14 +155,15 @@ func readSSHConfig(path string) (string, error) {
 }
 
 // renderSSHConfigBlock produces the full managed block string including markers.
-func renderSSHConfigBlock(entry SSHConfigEntry) string {
+// proxyScriptAbsPath is the absolute path to the SSM proxy wrapper script.
+func renderSSHConfigBlock(entry SSHConfigEntry, proxyScriptAbsPath string) string {
 	return fmt.Sprintf(`%s
 Host %s
   HostName %s
   User %s
   IdentityFile %s
   ForwardAgent yes
-  ProxyCommand aws ssm start-session --target %%h --document-name AWS-StartSSHSession --parameters portNumber=%%p --profile %s --region %s
+  ProxyCommand %s %%h %%p
   ServerAliveInterval 60
   ServerAliveCountMax 3
   StrictHostKeyChecking accept-new
@@ -98,20 +173,24 @@ Host %s
 		entry.InstanceID,
 		entry.User,
 		entry.IdentityFile,
-		entry.AWSProfile,
-		entry.Region,
+		proxyScriptAbsPath,
 		sshConfigEndMarker,
 	)
 }
 
-// RemoveSSHConfig removes the clouddesktop-managed block from ~/.ssh/config.
-// If no managed block exists, this is a no-op.
+// RemoveSSHConfig removes the clouddesktop-managed block from ~/.ssh/config
+// and deletes the proxy script. If no managed block or script exists, this is a no-op.
 func RemoveSSHConfig() error {
-	_, configPath, err := sshConfigPath()
+	sshDir, configPath, err := sshConfigPath()
 	if err != nil {
 		return err
 	}
-	return removeSSHConfigFrom(configPath)
+
+	if err := removeSSHConfigFrom(configPath); err != nil {
+		return err
+	}
+
+	return removeProxyScript(filepath.Join(sshDir, proxyScriptName))
 }
 
 // removeSSHConfigFrom contains the core SSH config removal logic, operating on an
