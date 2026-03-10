@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/huh"
 	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
 	"github.com/nbugash-viafoura/clouddesktop/internal/config"
 	"github.com/spf13/cobra"
@@ -13,17 +14,17 @@ import (
 // NewResizeCmd returns the resize command which changes the instance type.
 func NewResizeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "resize <instance-type>",
+		Use:   "resize",
 		Short: "Resize cloud desktop instance type",
-		Long:  "Changes the EC2 instance type (e.g., m7i.2xlarge). Stops the instance if running, applies the change, then restarts.",
-		Args:  cobra.ExactArgs(1),
+		Long:  "Changes the EC2 instance type. Presents a selection of supported instance types, stops the instance if running, applies the change, then restarts.",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runResize(args[0])
+			return runResize()
 		},
 	}
 }
 
-func runResize(newInstanceType string) error {
+func runResize() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -33,8 +34,28 @@ func runResize(newInstanceType string) error {
 		return fmt.Errorf("no instance provisioned. Run 'clouddesktop up' first")
 	}
 
+	var newInstanceType string
+	instanceTypeOptions := make([]huh.Option[string], len(config.ValidInstanceTypes))
+	for i, it := range config.ValidInstanceTypes {
+		instanceTypeOptions[i] = huh.NewOption(it.Label, it.Value)
+	}
+
+	selectForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title(fmt.Sprintf("Instance type (current: %s)", cfg.InstanceType)).
+				Options(instanceTypeOptions...).
+				Value(&newInstanceType),
+		),
+	)
+
+	if err := selectForm.Run(); err != nil {
+		return fmt.Errorf("resize cancelled: %w", err)
+	}
+
 	if cfg.InstanceType == newInstanceType {
-		return fmt.Errorf("instance is already type %s", newInstanceType)
+		fmt.Printf("Instance is already type %s. Nothing to do.\n", newInstanceType)
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

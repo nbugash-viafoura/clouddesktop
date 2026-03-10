@@ -183,22 +183,6 @@ Both JetBrains Gateway and VS Code Remote SSH pick up the `clouddesktop` host fr
 1. Install the "Remote - SSH" extension
 2. `Cmd+Shift+P` > Remote-SSH: Connect to Host > `clouddesktop`
 
-### First Session on the Instance
-
-After your first `clouddesktop up`, SSH in and run the developer setup script:
-
-```bash
-clouddesktop ssh
-~/.bootstrap-dev.sh
-```
-
-This verifies and configures:
-- SSH agent forwarding is working and GitHub SSH access is available
-- `.testcontainers.properties` for Java integration tests
-- Optional dotfiles clone via `DOTFILES_REPO` environment variable
-
-**Important:** Before running `.bootstrap-dev.sh`, make sure your local SSH key is loaded into your agent and added to your GitHub account. See the [Troubleshooting](#troubleshooting) section if you run into issues.
-
 ### Check Status
 
 ```bash
@@ -313,7 +297,6 @@ clouddesktop/
     shared/                      # One-time shared infra (IAM, SG, SSM params, state backend)
   scripts/
     bootstrap-system.sh          # System tooling (embedded, runs via user_data on first provision)
-    .bootstrap-dev.sh            # Developer setup (copied to instance, run manually after first SSH)
     embed.go                     # Embeds scripts into the binary
   .github/
     workflows/release.yml        # Builds and publishes releases on tag push
@@ -424,7 +407,7 @@ Ensure the SSM Session Manager plugin is installed (`session-manager-plugin`). A
 
 `clouddesktop` uses SSH agent forwarding to give the remote instance access to your local SSH keys. This means your private key never leaves your laptop -- the instance borrows it through the SSH connection. This is how `git clone` and `git push` work on the instance without storing secrets there.
 
-**`.bootstrap-dev.sh` fails with "No SSH keys available via agent forwarding"**
+**SSH key not forwarded to the instance**
 
 Your SSH key isn't loaded into your local agent. Load it before connecting:
 
@@ -444,7 +427,7 @@ If your key requires a passphrase and you're on macOS, you can add it to Keychai
 ssh-add --apple-use-keychain ~/.ssh/id_ed25519
 ```
 
-**`.bootstrap-dev.sh` fails with "GitHub SSH authentication failed"**
+**GitHub SSH authentication fails on the instance**
 
 Your SSH key is loaded in the agent but not registered with GitHub. Add it:
 
@@ -452,9 +435,7 @@ Your SSH key is loaded in the agent but not registered with GitHub. Add it:
 2. Go to [github.com/settings/keys](https://github.com/settings/keys)
 3. Click "New SSH key", paste the public key, and save
 
-Then reconnect and re-run `.bootstrap-dev.sh`.
-
-You can verify locally before connecting:
+Then reconnect to the instance. You can verify locally before connecting:
 ```bash
 ssh -T git@github.com
 # Should print: Hi <username>! You've successfully authenticated...
