@@ -1,6 +1,44 @@
-# clouddesktop — Cloud Desktop CLI
+# Cloud Desktop CLI
 
 A self-service CLI tool for provisioning and managing personal cloud development environments on AWS EC2. Each developer gets their own instance with Docker, Java 21, Node.js, and all the tooling needed to run Viafoura services remotely.
+
+## Table of Contents
+<details>
+  <summary>See table of contents</summary>
+
+- [Why](#why)
+- [How It Works](#how-it-works)
+  - [Cost](#cost)
+- [Prerequisites](#prerequisites)
+  - [1. AWS CLI v2](#1-aws-cli-v2)
+  - [2. SSM Session Manager Plugin](#2-ssm-session-manager-plugin)
+  - [3. SSH Key Pair](#3-ssh-key-pair)
+- [Installation](#installation)
+  - [Download (recommended)](#download-recommended)
+  - [Build from source](#build-from-source)
+- [Usage](#usage)
+  - [First-Time Setup](#first-time-setup)
+  - [Provision and Start](#provision-and-start)
+  - [Connect](#connect)
+  - [Check Status](#check-status)
+  - [Stop](#stop)
+  - [Resize Instance Type](#resize-instance-type)
+  - [Resize Storage](#resize-storage)
+  - [Destroy](#destroy)
+- [Commands Reference](#commands-reference)
+- [Daily Workflow](#daily-workflow)
+- [What's Installed on the Instance](#whats-installed-on-the-instance)
+- [Architecture](#architecture)
+  - [Instance State](#instance-state)
+- [Repository Structure](#repository-structure)
+- [Deployment (Admin Only)](#deployment-admin-only)
+  - [Shared Infrastructure (Tier 1)](#shared-infrastructure-tier-1)
+  - [Verifying the Deployment](#verifying-the-deployment)
+  - [Tearing Down Shared Infrastructure](#tearing-down-shared-infrastructure)
+- [Troubleshooting](#troubleshooting)
+  - [SSH Agent Forwarding Issues](#ssh-agent-forwarding-issues)
+  
+</details>
 
 ## Why
 
@@ -21,7 +59,8 @@ Compute cost is incurred only while the instance is running. Stopped instances o
 | Instance type | Running (10h/day, 22 days/month) | Stopped (EBS only) | Monthly estimate |
 |---|---|---|---|
 | `m7i.xlarge` (4 vCPU, 16 GB) | ~$44 | ~$8 | ~$52 |
-| `m7i.2xlarge` (8 vCPU, 32 GB) | ~$89 | ~$16 | ~$105 |
+| `m7i.2xlarge` (8 vCPU, 32 GB) | ~$89 | ~$8 | ~$97 |
+| `m7i.4xlarge` (16 vCPU, 64 GB) | ~$177 | ~$8 | ~$185 |
 
 ## Prerequisites
 
@@ -90,23 +129,30 @@ SSH agent forwarding is enabled automatically, so `git clone` and `git push` on 
 
 ### Download (recommended)
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/nbugash-viafoura/clouddesktop/releases/latest):
+Requires the [GitHub CLI](https://cli.github.com/) (`gh`) — the repo is private so downloads need authentication.
 
+**macOS (Apple Silicon)**
 ```bash
-# macOS Apple Silicon
-curl -L https://github.com/nbugash-viafoura/clouddesktop/releases/latest/download/clouddesktop-<version>-darwin-arm64.tar.gz | tar xz
-sudo mv clouddesktop /usr/local/bin/
-
-# macOS Intel
-curl -L https://github.com/nbugash-viafoura/clouddesktop/releases/latest/download/clouddesktop-<version>-darwin-amd64.tar.gz | tar xz
-sudo mv clouddesktop /usr/local/bin/
-
-# Linux
-curl -L https://github.com/nbugash-viafoura/clouddesktop/releases/latest/download/clouddesktop-<version>-linux-amd64.tar.gz | tar xz
-sudo mv clouddesktop /usr/local/bin/
+gh release download --repo nbugash-viafoura/clouddesktop --pattern "clouddesktop-*-darwin-arm64.tar.gz"
+tar -xzf clouddesktop-*-darwin-arm64.tar.gz
+sudo mkdir -p /usr/local/bin && sudo mv clouddesktop /usr/local/bin/clouddesktop
 ```
 
-Replace `<version>` with the release tag (e.g., `v1.0.0`). Verify with `clouddesktop --version`.
+**macOS (Intel)**
+```bash
+gh release download --repo nbugash-viafoura/clouddesktop --pattern "clouddesktop-*-darwin-amd64.tar.gz"
+tar -xzf clouddesktop-*-darwin-amd64.tar.gz
+sudo mkdir -p /usr/local/bin && sudo mv clouddesktop /usr/local/bin/clouddesktop
+```
+
+**Linux (amd64)**
+```bash
+gh release download --repo nbugash-viafoura/clouddesktop --pattern "clouddesktop-*-linux-amd64.tar.gz"
+tar -xzf clouddesktop-*-linux-amd64.tar.gz
+sudo mv clouddesktop /usr/local/bin/clouddesktop
+```
+
+Verify with `clouddesktop --version`.
 
 ### Build from source
 
@@ -199,13 +245,21 @@ clouddesktop down
 
 Stops the instance. All data is preserved on the EBS volume. No compute cost while stopped.
 
-### Resize
+### Resize Instance Type
 
 ```bash
-clouddesktop resize m7i.2xlarge
+clouddesktop resize-instance
 ```
 
-Changes the instance type. Stops the instance if running, applies the change, then restarts. Use this if CloudWatch metrics show you need more resources.
+Presents an interactive picker of supported instance types. Stops the instance if running, applies the change, then restarts. Use this if CloudWatch metrics show you need more CPU or memory.
+
+### Resize Storage
+
+```bash
+clouddesktop resize-storage
+```
+
+Grows the root EBS volume online — no instance stop required. Presents a picker of supported sizes larger than the current volume (100, 200, 300, 500, 1024, 1536, 2048 GB), then automatically extends the filesystem via SSM. Hard cap is 2 TB; EBS volumes cannot be shrunk.
 
 ### Destroy
 
@@ -224,7 +278,8 @@ Permanently terminates the instance and deletes all associated resources (EBS vo
 | `clouddesktop down` | Stop instance (data preserved) |
 | `clouddesktop status` | Show instance state, IP, uptime, metrics |
 | `clouddesktop ssh` | Open SSH session to instance |
-| `clouddesktop resize <type>` | Change instance type (e.g., `m7i.2xlarge`) |
+| `clouddesktop resize-instance` | Change instance type interactively |
+| `clouddesktop resize-storage` | Grow root EBS volume and extend filesystem online |
 | `clouddesktop destroy --confirm` | Permanently delete instance and all data |
 
 ## Daily Workflow

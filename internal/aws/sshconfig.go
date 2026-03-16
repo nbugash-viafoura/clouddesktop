@@ -12,6 +12,7 @@ const (
 	sshConfigBeginMarker = "# BEGIN clouddesktop managed block"
 	sshConfigEndMarker   = "# END clouddesktop managed block"
 	proxyScriptName      = "clouddesktop-ssm-proxy.sh"
+	sshConfigBackupName  = "config.clouddesktop-backup"
 )
 
 // SSMProxyDeps holds the resolved paths for binaries needed by the SSM proxy script.
@@ -121,6 +122,10 @@ func writeSSHConfigWithProxy(sshDir, configPath, scriptPath string, deps SSMProx
 		return err
 	}
 
+	if err := backupSSHConfig(sshDir, configPath); err != nil {
+		return err
+	}
+
 	block := renderSSHConfigBlock(entry, scriptPath)
 	updated := replaceOrAppendBlock(existing, block)
 
@@ -128,6 +133,28 @@ func writeSSHConfigWithProxy(sshDir, configPath, scriptPath string, deps SSMProx
 		return fmt.Errorf("failed to write SSH config: %w", err)
 	}
 
+	return nil
+}
+
+// backupSSHConfig copies configPath to ~/.ssh/config.clouddesktop-backup so the
+// engineer can restore their SSH config if something goes wrong. The backup is
+// only written when the source file exists and is non-empty; it is silently
+// skipped otherwise (e.g. fresh machines with no existing config).
+func backupSSHConfig(sshDir, configPath string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read SSH config for backup: %w", err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	backupPath := filepath.Join(sshDir, sshConfigBackupName)
+	if err := os.WriteFile(backupPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write SSH config backup: %w", err)
+	}
 	return nil
 }
 
@@ -178,8 +205,9 @@ Host %s
 	)
 }
 
-// RemoveSSHConfig removes the clouddesktop-managed block from ~/.ssh/config
-// and deletes the proxy script. If no managed block or script exists, this is a no-op.
+// RemoveSSHConfig removes the clouddesktop-managed block from ~/.ssh/config,
+// deletes the proxy script, and removes the backup file. If none of these
+// exist, this is a no-op.
 func RemoveSSHConfig() error {
 	sshDir, configPath, err := sshConfigPath()
 	if err != nil {
@@ -190,7 +218,15 @@ func RemoveSSHConfig() error {
 		return err
 	}
 
-	return removeProxyScript(filepath.Join(sshDir, proxyScriptName))
+	if err := removeProxyScript(filepath.Join(sshDir, proxyScriptName)); err != nil {
+		return err
+	}
+
+	backupPath := filepath.Join(sshDir, sshConfigBackupName)
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove SSH config backup: %w", err)
+	}
+	return nil
 }
 
 // removeSSHConfigFrom contains the core SSH config removal logic, operating on an
@@ -207,6 +243,14 @@ func removeSSHConfigFrom(configPath string) error {
 	updated := removeManagedBlock(content)
 	if updated == content {
 		return nil
+	}
+
+	sshDir := filepath.Dir(configPath)
+	backupPath := filepath.Join(sshDir, sshConfigBackupName)
+	if _, err := os.Stat(backupPath); err == nil {
+		if err := backupSSHConfig(sshDir, configPath); err != nil {
+			return err
+		}
 	}
 
 	if err := os.WriteFile(configPath, []byte(updated), 0600); err != nil {

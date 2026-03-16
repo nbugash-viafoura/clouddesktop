@@ -614,3 +614,133 @@ func TestRemoveSSHConfigFrom_NoBlock(t *testing.T) {
 		t.Error("file should be unchanged when no managed block exists")
 	}
 }
+
+// --- backupSSHConfig tests ---
+
+func TestBackupSSHConfig_CreatesBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	original := "Host bastion\n  User ec2-user\n"
+	if err := os.WriteFile(configPath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backupSSHConfig(tmpDir, configPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	backupPath := filepath.Join(tmpDir, sshConfigBackupName)
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("backup file not found: %v", err)
+	}
+	if string(data) != original {
+		t.Errorf("backup content = %q, want %q", string(data), original)
+	}
+
+	info, _ := os.Stat(backupPath)
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("backup file mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestBackupSSHConfig_NoSourceFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config") // does not exist
+
+	if err := backupSSHConfig(tmpDir, configPath); err != nil {
+		t.Fatalf("expected no error when source does not exist, got: %v", err)
+	}
+
+	backupPath := filepath.Join(tmpDir, sshConfigBackupName)
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Error("backup file should not be created when source does not exist")
+	}
+}
+
+func TestBackupSSHConfig_EmptySourceFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	if err := os.WriteFile(configPath, []byte(""), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backupSSHConfig(tmpDir, configPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	backupPath := filepath.Join(tmpDir, sshConfigBackupName)
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Error("backup file should not be created for empty source")
+	}
+}
+
+func TestWriteSSHConfigWithProxy_CreatesBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	scriptPath := filepath.Join(tmpDir, proxyScriptName)
+	original := "Host bastion\n  User ec2-user\n"
+	if err := os.WriteFile(configPath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeSSHConfigWithProxy(tmpDir, configPath, scriptPath, testDeps(), testEntry()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	backupPath := filepath.Join(tmpDir, sshConfigBackupName)
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("backup file not created: %v", err)
+	}
+	if string(data) != original {
+		t.Errorf("backup content = %q, want %q", string(data), original)
+	}
+}
+
+func TestRemoveSSHConfigFrom_UpdatesBackupWhenOneExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	block := renderSSHConfigBlock(testEntry(), testProxyScriptPath)
+	content := "Host bastion\n  User ec2-user\n\n" + block + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-create the backup file so removeSSHConfigFrom knows to update it.
+	backupPath := filepath.Join(tmpDir, sshConfigBackupName)
+	if err := os.WriteFile(backupPath, []byte("old backup"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeSSHConfigFrom(configPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("backup file not found after remove: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("backup content = %q, want %q", string(data), content)
+	}
+}
+
+func TestRemoveSSHConfigFrom_SkipsBackupWhenNoneExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config")
+	block := renderSSHConfigBlock(testEntry(), testProxyScriptPath)
+	content := "Host bastion\n  User ec2-user\n\n" + block + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeSSHConfigFrom(configPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	backupPath := filepath.Join(tmpDir, sshConfigBackupName)
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Error("backup file should not be created when no prior backup exists")
+	}
+}
