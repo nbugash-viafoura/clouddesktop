@@ -13,14 +13,18 @@ import (
 
 // Config represents the clouddesktop configuration stored in ~/.clouddesktop/config.yaml.
 type Config struct {
-	AWSProfile      string `yaml:"aws_profile"`
-	Region          string `yaml:"region"`
-	InstanceType    string `yaml:"instance_type"`
-	SSHPublicKey    string `yaml:"ssh_public_key"`
-	SSHKeyPath    	string `yaml:"ssh_key_path"`
-	DeveloperName 	string `yaml:"developer_name"`
-	InstanceID      string `yaml:"instance_id,omitempty"`
+	AWSProfile       string `yaml:"aws_profile"`
+	Region           string `yaml:"region"`
+	InstanceType     string `yaml:"instance_type"`
+	SSHPublicKey     string `yaml:"ssh_public_key"`
+	SSHKeyPath       string `yaml:"ssh_key_path"`
+	DeveloperName    string `yaml:"developer_name"`
+	InstanceID       string `yaml:"instance_id,omitempty"`
+	RootVolumeSizeGB int    `yaml:"root_volume_size_gb,omitempty"`
 }
+
+// ValidStorageSizes lists the supported root EBS volume sizes in GB.
+var ValidStorageSizes = []int{100, 200, 300, 500, 1024, 1536, 2048}
 
 var (
 	// ErrConfigNotFound is returned when the config file does not exist.

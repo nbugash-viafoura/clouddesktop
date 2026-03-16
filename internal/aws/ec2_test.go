@@ -15,15 +15,18 @@ import (
 
 // mockEC2API implements ec2api for testing.
 type mockEC2API struct {
-	startFn       func(ctx context.Context, params *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error)
-	stopFn        func(ctx context.Context, params *ec2.StopInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error)
-	describeFn    func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
-	runFn         func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
-	terminateFn   func(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
-	importKeyFn   func(ctx context.Context, params *ec2.ImportKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.ImportKeyPairOutput, error)
-	deleteKeyFn   func(ctx context.Context, params *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error)
-	describeImgFn func(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
-	modifyAttrFn  func(ctx context.Context, params *ec2.ModifyInstanceAttributeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyInstanceAttributeOutput, error)
+	startFn            func(ctx context.Context, params *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error)
+	stopFn             func(ctx context.Context, params *ec2.StopInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error)
+	describeFn         func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+	runFn              func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
+	terminateFn        func(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+	importKeyFn        func(ctx context.Context, params *ec2.ImportKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.ImportKeyPairOutput, error)
+	deleteKeyFn        func(ctx context.Context, params *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error)
+	describeImgFn      func(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
+	modifyAttrFn       func(ctx context.Context, params *ec2.ModifyInstanceAttributeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyInstanceAttributeOutput, error)
+	describeVolumesFn  func(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
+	modifyVolumeFn     func(ctx context.Context, params *ec2.ModifyVolumeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVolumeOutput, error)
+	describeVolumeModsFn func(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error)
 }
 
 func (m *mockEC2API) StartInstances(ctx context.Context, params *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error) {
@@ -87,6 +90,27 @@ func (m *mockEC2API) ModifyInstanceAttribute(ctx context.Context, params *ec2.Mo
 		return m.modifyAttrFn(ctx, params, optFns...)
 	}
 	return &ec2.ModifyInstanceAttributeOutput{}, nil
+}
+
+func (m *mockEC2API) DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
+	if m.describeVolumesFn != nil {
+		return m.describeVolumesFn(ctx, params, optFns...)
+	}
+	return &ec2.DescribeVolumesOutput{}, nil
+}
+
+func (m *mockEC2API) ModifyVolume(ctx context.Context, params *ec2.ModifyVolumeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVolumeOutput, error) {
+	if m.modifyVolumeFn != nil {
+		return m.modifyVolumeFn(ctx, params, optFns...)
+	}
+	return &ec2.ModifyVolumeOutput{}, nil
+}
+
+func (m *mockEC2API) DescribeVolumesModifications(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error) {
+	if m.describeVolumeModsFn != nil {
+		return m.describeVolumeModsFn(ctx, params, optFns...)
+	}
+	return &ec2.DescribeVolumesModificationsOutput{}, nil
 }
 
 // fastClient creates an EC2Client with minimal polling intervals for fast tests.
@@ -675,6 +699,259 @@ func TestRunInstance_Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to launch instance") {
 		t.Errorf("error = %q, want to contain 'failed to launch instance'", err)
+	}
+}
+
+// --- Tests for EBS volume methods ---
+
+// describeInstanceWithVolume builds a DescribeInstances response with block device mapping.
+func describeInstanceWithVolume(instanceID, rootDevice, volumeID string) *ec2.DescribeInstancesOutput {
+	now := time.Now()
+	return &ec2.DescribeInstancesOutput{
+		Reservations: []types.Reservation{
+			{
+				Instances: []types.Instance{
+					{
+						InstanceId:       aws.String(instanceID),
+						State:            &types.InstanceState{Name: types.InstanceStateNameRunning},
+						InstanceType:     types.InstanceTypeM7iXlarge,
+						PrivateIpAddress: aws.String("10.0.1.5"),
+						LaunchTime:       &now,
+						RootDeviceName:   aws.String(rootDevice),
+						BlockDeviceMappings: []types.InstanceBlockDeviceMapping{
+							{
+								DeviceName: aws.String(rootDevice),
+								Ebs: &types.EbsInstanceBlockDevice{
+									VolumeId: aws.String(volumeID),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestGetRootVolumeInfo_Success(t *testing.T) {
+	var size int32 = 100
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			return describeInstanceWithVolume("i-123", "/dev/sda1", "vol-abc"), nil
+		},
+		describeVolumesFn: func(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
+			return &ec2.DescribeVolumesOutput{
+				Volumes: []types.Volume{{VolumeId: aws.String("vol-abc"), Size: &size}},
+			}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	volumeID, sizeGB, err := client.GetRootVolumeInfo(context.Background(), "i-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if volumeID != "vol-abc" {
+		t.Errorf("volumeID = %q, want vol-abc", volumeID)
+	}
+	if sizeGB != 100 {
+		t.Errorf("sizeGB = %d, want 100", sizeGB)
+	}
+}
+
+func TestGetRootVolumeInfo_InstanceNotFound(t *testing.T) {
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{}}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	_, _, err := client.GetRootVolumeInfo(context.Background(), "i-missing")
+	if err == nil {
+		t.Fatal("expected error for missing instance")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want to contain 'not found'", err)
+	}
+}
+
+func TestGetRootVolumeInfo_NoRootDevice(t *testing.T) {
+	now := time.Now()
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			return &ec2.DescribeInstancesOutput{
+				Reservations: []types.Reservation{
+					{
+						Instances: []types.Instance{
+							{
+								InstanceId:          aws.String("i-123"),
+								State:               &types.InstanceState{Name: types.InstanceStateNameRunning},
+								RootDeviceName:      nil, // no root device
+								BlockDeviceMappings: []types.InstanceBlockDeviceMapping{},
+								LaunchTime:          &now,
+							},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	_, _, err := client.GetRootVolumeInfo(context.Background(), "i-123")
+	if err == nil {
+		t.Fatal("expected error for missing root device name")
+	}
+	if !strings.Contains(err.Error(), "no root device name") {
+		t.Errorf("error = %q, want to contain 'no root device name'", err)
+	}
+}
+
+func TestModifyRootVolume_Success(t *testing.T) {
+	mock := &mockEC2API{}
+	client := newEC2ClientWithAPI(mock)
+
+	err := client.ModifyRootVolume(context.Background(), "vol-abc", 200)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestModifyRootVolume_Error(t *testing.T) {
+	mock := &mockEC2API{
+		modifyVolumeFn: func(ctx context.Context, params *ec2.ModifyVolumeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVolumeOutput, error) {
+			return nil, errors.New("size must be larger than current size")
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	err := client.ModifyRootVolume(context.Background(), "vol-abc", 50)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to modify volume") {
+		t.Errorf("error = %q, want to contain 'failed to modify volume'", err)
+	}
+}
+
+func TestWaitUntilVolumeResized_ImmediateOptimizing(t *testing.T) {
+	mock := &mockEC2API{
+		describeVolumeModsFn: func(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error) {
+			return &ec2.DescribeVolumesModificationsOutput{
+				VolumesModifications: []types.VolumeModification{
+					{ModificationState: types.VolumeModificationStateOptimizing},
+				},
+			}, nil
+		},
+	}
+	client := fastClient(mock)
+
+	err := client.WaitUntilVolumeResized(context.Background(), "vol-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitUntilVolumeResized_EventuallyCompleted(t *testing.T) {
+	callCount := 0
+	mock := &mockEC2API{
+		describeVolumeModsFn: func(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error) {
+			callCount++
+			state := types.VolumeModificationStateModifying
+			if callCount >= 3 {
+				state = types.VolumeModificationStateCompleted
+			}
+			return &ec2.DescribeVolumesModificationsOutput{
+				VolumesModifications: []types.VolumeModification{
+					{ModificationState: state},
+				},
+			}, nil
+		},
+	}
+	client := fastClient(mock)
+
+	err := client.WaitUntilVolumeResized(context.Background(), "vol-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if callCount < 3 {
+		t.Errorf("expected at least 3 describe calls, got %d", callCount)
+	}
+}
+
+func TestWaitUntilVolumeResized_Failed(t *testing.T) {
+	failMsg := "volume modification request failed"
+	mock := &mockEC2API{
+		describeVolumeModsFn: func(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error) {
+			return &ec2.DescribeVolumesModificationsOutput{
+				VolumesModifications: []types.VolumeModification{
+					{
+						ModificationState: types.VolumeModificationStateFailed,
+						StatusMessage:     aws.String(failMsg),
+					},
+				},
+			}, nil
+		},
+	}
+	client := fastClient(mock)
+
+	err := client.WaitUntilVolumeResized(context.Background(), "vol-abc")
+	if err == nil {
+		t.Fatal("expected error for failed modification")
+	}
+	if !strings.Contains(err.Error(), failMsg) {
+		t.Errorf("error = %q, want to contain %q", err, failMsg)
+	}
+}
+
+func TestWaitUntilVolumeResized_ContextCancelled(t *testing.T) {
+	mock := &mockEC2API{
+		describeVolumeModsFn: func(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error) {
+			return &ec2.DescribeVolumesModificationsOutput{
+				VolumesModifications: []types.VolumeModification{
+					{ModificationState: types.VolumeModificationStateModifying},
+				},
+			}, nil
+		},
+	}
+	client := fastClient(mock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := client.WaitUntilVolumeResized(ctx, "vol-abc")
+	if err == nil {
+		t.Fatal("expected context cancelled error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWaitUntilVolumeResized_TransientErrorRetried(t *testing.T) {
+	callCount := 0
+	mock := &mockEC2API{
+		describeVolumeModsFn: func(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error) {
+			callCount++
+			if callCount == 1 {
+				return nil, fmt.Errorf("failed to describe volume modifications: %w", errors.New("Throttling: rate exceeded"))
+			}
+			return &ec2.DescribeVolumesModificationsOutput{
+				VolumesModifications: []types.VolumeModification{
+					{ModificationState: types.VolumeModificationStateOptimizing},
+				},
+			}, nil
+		},
+	}
+	client := fastClient(mock)
+
+	err := client.WaitUntilVolumeResized(context.Background(), "vol-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if callCount < 2 {
+		t.Errorf("expected at least 2 describe calls (retry after transient error), got %d", callCount)
 	}
 }
 

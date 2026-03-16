@@ -11,10 +11,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewResizeCmd returns the resize command which changes the instance type.
-func NewResizeCmd() *cobra.Command {
+// NewResizeInstanceCmd returns the resize-instance command which changes the instance type.
+func NewResizeInstanceCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "resize",
+		Use:   "resize-instance",
 		Short: "Resize cloud desktop instance type",
 		Long:  "Changes the EC2 instance type. Presents a selection of supported instance types, stops the instance if running, applies the change, then restarts.",
 		Args:  cobra.NoArgs,

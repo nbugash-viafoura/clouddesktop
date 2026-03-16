@@ -32,6 +32,9 @@ type ec2api interface {
 	DeleteKeyPair(ctx context.Context, params *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error)
 	DescribeImages(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
 	ModifyInstanceAttribute(ctx context.Context, params *ec2.ModifyInstanceAttributeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyInstanceAttributeOutput, error)
+	DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
+	ModifyVolume(ctx context.Context, params *ec2.ModifyVolumeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVolumeOutput, error)
+	DescribeVolumesModifications(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error)
 }
 
 // EC2Client wraps AWS EC2 API operations for managing cloud desktop instances.
@@ -430,6 +433,132 @@ func isNotFoundError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "not found")
+}
+
+// GetRootVolumeInfo returns the volume ID and current size (GB) of the root EBS volume.
+func (c *EC2Client) GetRootVolumeInfo(ctx context.Context, instanceID string) (volumeID string, sizeGB int32, err error) {
+	output, err := c.client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		Filters: []types.Filter{
+			{
+				Name:   strPtr("instance-id"),
+				Values: []string{instanceID},
+			},
+		},
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to describe instance %s: %w", instanceID, err)
+	}
+
+	if len(output.Reservations) == 0 || len(output.Reservations[0].Instances) == 0 {
+		return "", 0, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	inst := output.Reservations[0].Instances[0]
+	if inst.RootDeviceName == nil {
+		return "", 0, fmt.Errorf("instance %s has no root device name", instanceID)
+	}
+
+	var rootVolumeID string
+	for _, bdm := range inst.BlockDeviceMappings {
+		if bdm.DeviceName != nil && *bdm.DeviceName == *inst.RootDeviceName && bdm.Ebs != nil && bdm.Ebs.VolumeId != nil {
+			rootVolumeID = *bdm.Ebs.VolumeId
+			break
+		}
+	}
+
+	if rootVolumeID == "" {
+		return "", 0, fmt.Errorf("no root volume found for instance %s", instanceID)
+	}
+
+	volOutput, err := c.client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
+		VolumeIds: []string{rootVolumeID},
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to describe volume %s: %w", rootVolumeID, err)
+	}
+
+	if len(volOutput.Volumes) == 0 {
+		return "", 0, fmt.Errorf("volume %s not found", rootVolumeID)
+	}
+
+	vol := volOutput.Volumes[0]
+	if vol.Size == nil {
+		return "", 0, fmt.Errorf("volume %s has no size", rootVolumeID)
+	}
+
+	return rootVolumeID, *vol.Size, nil
+}
+
+// ModifyRootVolume resizes the given EBS volume to newSizeGB.
+// Caller must ensure newSizeGB > current size (EBS volumes are grow-only).
+func (c *EC2Client) ModifyRootVolume(ctx context.Context, volumeID string, newSizeGB int32) error {
+	_, err := c.client.ModifyVolume(ctx, &ec2.ModifyVolumeInput{
+		VolumeId: &volumeID,
+		Size:     &newSizeGB,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to modify volume %s: %w", volumeID, err)
+	}
+	return nil
+}
+
+// WaitUntilVolumeResized polls until the volume modification reaches "optimizing" or "completed".
+// EBS is fully usable once in "optimizing"; waiting for "completed" can take hours.
+// Returns an error if the modification reaches "failed" or the context is cancelled.
+func (c *EC2Client) WaitUntilVolumeResized(ctx context.Context, volumeID string) error {
+	interval := c.pollInitialInterval
+	consecutiveErrors := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		output, err := c.client.DescribeVolumesModifications(ctx, &ec2.DescribeVolumesModificationsInput{
+			VolumeIds: []string{volumeID},
+		})
+		if err != nil {
+			if isTransientError(err) {
+				consecutiveErrors++
+				if consecutiveErrors >= pollMaxConsecutiveErrors {
+					return fmt.Errorf("too many errors waiting for volume %s to resize: %w", volumeID, err)
+				}
+			} else {
+				return fmt.Errorf("failed to describe volume modifications for %s: %w", volumeID, err)
+			}
+		} else {
+			consecutiveErrors = 0
+			if len(output.VolumesModifications) > 0 {
+				mod := output.VolumesModifications[0]
+				switch mod.ModificationState {
+				case types.VolumeModificationStateOptimizing, types.VolumeModificationStateCompleted:
+					return nil
+				case types.VolumeModificationStateFailed:
+					msg := "volume modification failed"
+					if mod.StatusMessage != nil {
+						msg = fmt.Sprintf("volume modification failed: %s", *mod.StatusMessage)
+					}
+					return fmt.Errorf("%s", msg)
+				}
+			}
+		}
+
+		jitter := time.Duration(rand.Int63n(int64(interval / 4)))
+		sleep := interval + jitter
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sleep):
+		}
+
+		interval = interval * 2
+		if interval > c.pollMaxInterval {
+			interval = c.pollMaxInterval
+		}
+	}
 }
 
 // strPtr returns a pointer to the given string value.

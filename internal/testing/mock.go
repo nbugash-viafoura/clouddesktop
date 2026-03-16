@@ -12,14 +12,20 @@ import (
 
 // MockEC2Client is a test double for aws.EC2Client.
 type MockEC2Client struct {
-	StartInstanceFn       func(ctx context.Context, instanceID string) error
-	StopInstanceFn        func(ctx context.Context, instanceID string) error
-	DescribeInstanceFn    func(ctx context.Context, instanceID string) (*aws.InstanceInfo, error)
-	WaitUntilRunningFn    func(ctx context.Context, instanceID string) error
-	WaitUntilStoppedFn    func(ctx context.Context, instanceID string) error
-	StartInstanceCalls    int
-	StopInstanceCalls     int
-	DescribeInstanceCalls int
+	StartInstanceFn              func(ctx context.Context, instanceID string) error
+	StopInstanceFn               func(ctx context.Context, instanceID string) error
+	DescribeInstanceFn           func(ctx context.Context, instanceID string) (*aws.InstanceInfo, error)
+	WaitUntilRunningFn           func(ctx context.Context, instanceID string) error
+	WaitUntilStoppedFn           func(ctx context.Context, instanceID string) error
+	GetRootVolumeInfoFn          func(ctx context.Context, instanceID string) (string, int32, error)
+	ModifyRootVolumeFn           func(ctx context.Context, volumeID string, newSizeGB int32) error
+	WaitUntilVolumeResizedFn     func(ctx context.Context, volumeID string) error
+	StartInstanceCalls           int
+	StopInstanceCalls            int
+	DescribeInstanceCalls        int
+	GetRootVolumeInfoCalls       int
+	ModifyRootVolumeCalls        int
+	WaitUntilVolumeResizedCalls  int
 }
 
 // StartInstance calls the mock function.
@@ -72,6 +78,59 @@ func (m *MockEC2Client) WaitUntilStopped(ctx context.Context, instanceID string)
 	return nil
 }
 
+// GetRootVolumeInfo calls the mock function.
+func (m *MockEC2Client) GetRootVolumeInfo(ctx context.Context, instanceID string) (string, int32, error) {
+	m.GetRootVolumeInfoCalls++
+	if m.GetRootVolumeInfoFn != nil {
+		return m.GetRootVolumeInfoFn(ctx, instanceID)
+	}
+	return "vol-0123456789abcdef0", 100, nil
+}
+
+// ModifyRootVolume calls the mock function.
+func (m *MockEC2Client) ModifyRootVolume(ctx context.Context, volumeID string, newSizeGB int32) error {
+	m.ModifyRootVolumeCalls++
+	if m.ModifyRootVolumeFn != nil {
+		return m.ModifyRootVolumeFn(ctx, volumeID, newSizeGB)
+	}
+	return nil
+}
+
+// WaitUntilVolumeResized calls the mock function.
+func (m *MockEC2Client) WaitUntilVolumeResized(ctx context.Context, volumeID string) error {
+	m.WaitUntilVolumeResizedCalls++
+	if m.WaitUntilVolumeResizedFn != nil {
+		return m.WaitUntilVolumeResizedFn(ctx, volumeID)
+	}
+	return nil
+}
+
+// MockSSMClient is a test double for aws.SSMClient.
+type MockSSMClient struct {
+	RunFilesystemExtensionFn       func(ctx context.Context, instanceID string) (string, error)
+	WaitUntilCommandCompleteFn     func(ctx context.Context, instanceID, commandID string) error
+	RunFilesystemExtensionCalls    int
+	WaitUntilCommandCompleteCalls  int
+}
+
+// RunFilesystemExtension calls the mock function.
+func (m *MockSSMClient) RunFilesystemExtension(ctx context.Context, instanceID string) (string, error) {
+	m.RunFilesystemExtensionCalls++
+	if m.RunFilesystemExtensionFn != nil {
+		return m.RunFilesystemExtensionFn(ctx, instanceID)
+	}
+	return "cmd-0123456789abcdef0", nil
+}
+
+// WaitUntilCommandComplete calls the mock function.
+func (m *MockSSMClient) WaitUntilCommandComplete(ctx context.Context, instanceID, commandID string) error {
+	m.WaitUntilCommandCompleteCalls++
+	if m.WaitUntilCommandCompleteFn != nil {
+		return m.WaitUntilCommandCompleteFn(ctx, instanceID, commandID)
+	}
+	return nil
+}
+
 // MockCloudWatchClient is a test double for aws.CloudWatchClient.
 type MockCloudWatchClient struct {
 	GetInstanceMetricsFn    func(ctx context.Context, instanceID string) (*aws.InstanceMetrics, error)
@@ -94,13 +153,13 @@ func (m *MockCloudWatchClient) GetInstanceMetrics(ctx context.Context, instanceI
 // TestConfig returns a valid config for testing.
 func TestConfig() *config.Config {
 	return &config.Config{
-		AWSProfile:      "test-developers",
-		Region:          "us-east-1",
-		InstanceType:    "m7i.xlarge",
-		SSHPublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKlh4pZYi3EZg7OMPKDa1Nt2yw9Z8CZSmjQ2qC8i1nC8 test@example.com",
+		AWSProfile:    "test-developers",
+		Region:        "us-east-1",
+		InstanceType:  "m7i.xlarge",
+		SSHPublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKlh4pZYi3EZg7OMPKDa1Nt2yw9Z8CZSmjQ2qC8i1nC8 test@example.com",
 		SSHKeyPath:    "/home/test/.ssh/id_ed25519",
 		DeveloperName: "john-dev",
-		InstanceID:      "i-0123456789abcdef0",
+		InstanceID:    "i-0123456789abcdef0",
 	}
 }
 
@@ -112,9 +171,9 @@ func ValidConfig() *config.Config {
 // InvalidConfig returns a config with missing required fields.
 func InvalidConfig() *config.Config {
 	return &config.Config{
-		AWSProfile:   "test-developers",
-		Region:       "", // missing region
-		InstanceType: "m7i.xlarge",
+		AWSProfile:    "test-developers",
+		Region:        "", // missing region
+		InstanceType:  "m7i.xlarge",
 		DeveloperName: "john-dev",
 	}
 }
