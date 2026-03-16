@@ -20,7 +20,8 @@ func NewRootCmd() *cobra.Command {
 		NewDownCmd(),
 		NewStatusCmd(),
 		NewSSHCmd(),
-		NewResizeCmd(),
+		NewResizeInstanceCmd(),
+		NewResizeStorageCmd(),
 		NewDestroyCmd(),
 	)
 

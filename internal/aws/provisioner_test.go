@@ -37,6 +37,14 @@ func (m *mockSSMForProvisioner) GetParameter(_ context.Context, input *ssm.GetPa
 	}, nil
 }
 
+func (m *mockSSMForProvisioner) SendCommand(_ context.Context, _ *ssm.SendCommandInput, _ ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
+	return &ssm.SendCommandOutput{}, nil
+}
+
+func (m *mockSSMForProvisioner) GetCommandInvocation(_ context.Context, _ *ssm.GetCommandInvocationInput, _ ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error) {
+	return &ssm.GetCommandInvocationOutput{Status: ssmtypes.CommandInvocationStatusSuccess}, nil
+}
+
 func defaultSSMMock() *mockSSMForProvisioner {
 	return &mockSSMForProvisioner{
 		params: map[string]string{
