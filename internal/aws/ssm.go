@@ -19,6 +19,8 @@ const (
 // ssmapi is the subset of the AWS SSM SDK client used by SSMClient.
 type ssmapi interface {
 	GetParameter(ctx context.Context, params *ssm.GetParameterInput, optFns ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
+	PutParameter(ctx context.Context, params *ssm.PutParameterInput, optFns ...func(*ssm.Options)) (*ssm.PutParameterOutput, error)
+	DeleteParameter(ctx context.Context, params *ssm.DeleteParameterInput, optFns ...func(*ssm.Options)) (*ssm.DeleteParameterOutput, error)
 	SendCommand(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error)
 	GetCommandInvocation(ctx context.Context, params *ssm.GetCommandInvocationInput, optFns ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error)
 }
@@ -42,6 +44,8 @@ const (
 	ssmParamSubnetID            = "/clouddesktop/shared/subnet_id"
 	ssmParamSecurityGroupID     = "/clouddesktop/shared/security_group_id"
 	ssmParamInstanceProfileName = "/clouddesktop/shared/instance_profile_name"
+
+	ssmParamDeveloperS3Bucket = "/clouddesktop/developer/%s/s3_bucket_name"
 )
 
 // filesystemExtensionScript grows the root partition and resizes the ext4 filesystem.
@@ -124,6 +128,125 @@ func (c *SSMClient) getParameter(ctx context.Context, name string) (string, erro
 		return "", fmt.Errorf("SSM parameter %s has no value", name)
 	}
 	return *output.Parameter.Value, nil
+}
+
+// S3BucketParamName returns the SSM parameter path for a developer's S3 bucket.
+func S3BucketParamName(developerName string) string {
+	return fmt.Sprintf(ssmParamDeveloperS3Bucket, developerName)
+}
+
+// GetDeveloperS3Bucket reads the S3 bucket name for a developer from SSM.
+// Returns empty string and nil error if the parameter does not exist.
+func (c *SSMClient) GetDeveloperS3Bucket(ctx context.Context, developerName string) (string, error) {
+	paramName := S3BucketParamName(developerName)
+	value, err := c.getParameter(ctx, paramName)
+	if err != nil {
+		if isParameterNotFoundError(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read S3 bucket param for %s: %w", developerName, err)
+	}
+	return value, nil
+}
+
+// PutDeveloperS3Bucket stores the S3 bucket name for a developer in SSM.
+func (c *SSMClient) PutDeveloperS3Bucket(ctx context.Context, developerName, bucketName string) error {
+	paramName := S3BucketParamName(developerName)
+	return c.putParameter(ctx, paramName, bucketName)
+}
+
+// DeleteDeveloperS3Bucket removes the S3 bucket parameter for a developer from SSM.
+func (c *SSMClient) DeleteDeveloperS3Bucket(ctx context.Context, developerName string) error {
+	paramName := S3BucketParamName(developerName)
+	return c.deleteParameter(ctx, paramName)
+}
+
+// putParameter writes a single SSM parameter value (overwrite if exists).
+func (c *SSMClient) putParameter(ctx context.Context, name, value string) error {
+	overwrite := true
+	_, err := c.client.PutParameter(ctx, &ssm.PutParameterInput{
+		Name:      &name,
+		Value:     &value,
+		Type:      ssmtypes.ParameterTypeString,
+		Overwrite: &overwrite,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to put SSM parameter %s: %w", name, err)
+	}
+	return nil
+}
+
+// deleteParameter removes a single SSM parameter. Returns nil if the parameter does not exist.
+func (c *SSMClient) deleteParameter(ctx context.Context, name string) error {
+	_, err := c.client.DeleteParameter(ctx, &ssm.DeleteParameterInput{
+		Name: &name,
+	})
+	if err != nil {
+		if isParameterNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete SSM parameter %s: %w", name, err)
+	}
+	return nil
+}
+
+// isParameterNotFoundError checks if the error indicates the SSM parameter does not exist.
+func isParameterNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "ParameterNotFound")
+}
+
+// RunS3Mount sends a command to install mount-s3 and mount the bucket on the instance.
+func (c *SSMClient) RunS3Mount(ctx context.Context, instanceID, bucketName string) (string, error) {
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+# Install Mountpoint for Amazon S3 if not present
+if ! command -v mount-s3 &>/dev/null; then
+    curl -fsSL -o /tmp/mount-s3.deb "https://s3.amazonaws.com/mountpoint-s3-release/latest/x86_64/mount-s3.deb"
+    apt-get install -y /tmp/mount-s3.deb
+    rm -f /tmp/mount-s3.deb
+fi
+
+# Enable FUSE allow_other
+grep -q user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf
+
+# Unmount stale FUSE mount if present
+if mountpoint -q /home/ubuntu/s3 2>/dev/null; then
+    umount /home/ubuntu/s3 || fusermount -u /home/ubuntu/s3 || true
+fi
+
+# Create mount point and set ownership
+mkdir -p /home/ubuntu/s3
+chown ubuntu:ubuntu /home/ubuntu/s3
+
+# Mount the bucket
+mount-s3 --allow-delete --allow-overwrite --allow-other --uid 1000 --gid 1000 %s /home/ubuntu/s3
+
+# Remove any stale fstab entries for /home/ubuntu/s3
+sed -i '\|/home/ubuntu/s3|d' /etc/fstab
+
+# Add fstab entry for auto-mount on boot
+echo '%s /home/ubuntu/s3 fuse.mount-s3 _netdev,allow_other,allow_delete,allow_overwrite,uid=1000,gid=1000 0 0' >> /etc/fstab`, bucketName, bucketName)
+
+	output, err := c.client.SendCommand(ctx, &ssm.SendCommandInput{
+		DocumentName: strPtr("AWS-RunShellScript"),
+		InstanceIds:  []string{instanceID},
+		Parameters: map[string][]string{
+			"commands": {script},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to send S3 mount command to instance %s: %w", instanceID, err)
+	}
+
+	if output.Command == nil || output.Command.CommandId == nil {
+		return "", fmt.Errorf("SendCommand returned no command ID")
+	}
+
+	return *output.Command.CommandId, nil
 }
 
 // isInvocationNotFoundError reports whether the error is the SSM InvocationDoesNotExist

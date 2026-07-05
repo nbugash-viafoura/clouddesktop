@@ -50,3 +50,26 @@ func validateSessionWithClient(ctx context.Context, client stsapi) error {
 
 	return nil
 }
+
+// GetAccountID returns the AWS account ID for the current session.
+func GetAccountID(ctx context.Context, profile, region string) (string, error) {
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithSharedConfigProfile(profile),
+		config.WithRegion(region),
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	client := sts.NewFromConfig(cfg)
+	output, err := client.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get account ID: %w", err)
+	}
+
+	if output.Account == nil {
+		return "", errors.New("STS returned no account ID")
+	}
+
+	return *output.Account, nil
+}

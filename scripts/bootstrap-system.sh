@@ -180,7 +180,15 @@ export SDKMAN_DIR="$HOME/.sdkman"
 ZSHEOF
 chown ubuntu:ubuntu /home/ubuntu/.zshrc
 
-log "Step 11: Verifying SSM Agent installation and status..."
+log "Step 11: Installing Mountpoint for Amazon S3..."
+curl -fsSL -o /tmp/mount-s3.deb "https://s3.amazonaws.com/mountpoint-s3-release/latest/x86_64/mount-s3.deb"
+apt-get install -y /tmp/mount-s3.deb
+rm -f /tmp/mount-s3.deb
+grep -q user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf
+mkdir -p /home/ubuntu/s3
+chown ubuntu:ubuntu /home/ubuntu/s3
+
+log "Step 12: Verifying SSM Agent installation and status..."
 if ! systemctl is-active --quiet amazon-ssm-agent; then
   log "SSM Agent not active, installing via snap..."
   snap install amazon-ssm-agent --classic
@@ -190,17 +198,17 @@ else
   log "SSM Agent already active."
 fi
 
-log "Step 12: Installing CloudWatch Agent..."
+log "Step 13: Installing CloudWatch Agent..."
 wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O /tmp/amazon-cloudwatch-agent.deb
 dpkg -i /tmp/amazon-cloudwatch-agent.deb
 rm /tmp/amazon-cloudwatch-agent.deb
 
-log "Step 13: Hardening SSH configuration..."
+log "Step 14: Hardening SSH configuration..."
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 systemctl restart ssh
 
-log "Step 14: Installing clouddesktop auto-stop service..."
+log "Step 15: Installing clouddesktop auto-stop service..."
 
 cat > /usr/local/bin/clouddesktop-autostop <<'AUTOSTOP_SCRIPT'
 #!/bin/bash
@@ -302,7 +310,20 @@ systemctl daemon-reload
 systemctl enable clouddesktop-autostop.timer
 systemctl start clouddesktop-autostop.timer
 
-log "Step 15: Marking bootstrap as complete..."
+log "Step 16: Tuning kernel inotify limits for dev workloads..."
+# The default fs.inotify.max_user_instances (128) is too low for a host running
+# Docker, k3d, containerd, the CloudWatch agent, and the SSM agent all as root.
+# When root exhausts its inotify-instance budget, the SSM agent cannot create the
+# file-watcher IPC channel for a new Session Manager session, so 'clouddesktop ssh'
+# fails with "filewatcher ... too many open files" / "ipc messaging received
+# timeout signal" while an existing session (e.g. JetBrains Gateway) is connected.
+cat > /etc/sysctl.d/99-clouddesktop-inotify.conf <<'SYSCTL'
+fs.inotify.max_user_instances=8192
+fs.inotify.max_user_watches=524288
+SYSCTL
+sysctl --system
+
+log "Step 17: Marking bootstrap as complete..."
 touch /var/log/bootstrap-system-complete
 
 log "Bootstrap complete. Instance is ready."

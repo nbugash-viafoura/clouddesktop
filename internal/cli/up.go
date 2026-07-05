@@ -59,7 +59,12 @@ func runProvision(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
-	provisioner := vfaws.NewProvisioner(ec2Client, ssmClient)
+	s3Client, err := vfaws.NewS3Client(ctx, cfg.AWSProfile, cfg.Region)
+	if err != nil {
+		return err
+	}
+
+	provisioner := vfaws.NewProvisioner(ec2Client, ssmClient, s3Client)
 
 	fmt.Printf("Provisioning instance (type: %s)...\n", cfg.InstanceType)
 	result, err := provisioner.Provision(ctx, vfaws.ProvisionParams{
@@ -95,6 +100,15 @@ func runProvision(ctx context.Context, cfg *config.Config) error {
 		fmt.Println()
 		fmt.Println("Waiting for bootstrap to complete (this takes ~10 minutes on first provision)...")
 		fmt.Println("You can check progress: clouddesktop ssh, then 'tail -f /var/log/bootstrap-system.log'")
+		fmt.Println()
+		fmt.Println("S3 bucket created. The mount will be configured once bootstrap completes.")
+		fmt.Println("Run 'clouddesktop up' again after bootstrap to activate the S3 mount at /home/ubuntu/s3")
+	} else {
+		// For recovered instances, set up S3 mount if not already configured.
+		if err := provisioner.SetupS3Mount(ctx, result.InstanceID, cfg.DeveloperName); err != nil {
+			fmt.Printf("Warning: S3 mount setup failed: %s\n", err)
+			fmt.Println("  You can retry with 'clouddesktop up' once the instance is ready.")
+		}
 	}
 
 	info, err := ec2Client.DescribeInstance(ctx, result.InstanceID)
@@ -152,6 +166,12 @@ func runStart(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
+	// Set up S3 mount if not already configured for this developer.
+	if err := ensureS3Mount(ctx, cfg); err != nil {
+		fmt.Printf("Warning: S3 mount setup failed: %s\n", err)
+		fmt.Println("  You can retry with 'clouddesktop up' once the instance is ready.")
+	}
+
 	info, err = ec2Client.DescribeInstance(ctx, cfg.InstanceID)
 	if err != nil {
 		return err
@@ -159,6 +179,44 @@ func runStart(ctx context.Context, cfg *config.Config) error {
 	fmt.Println("Cloud desktop is running.")
 	printInstanceSummary(info, cfg)
 	return nil
+}
+
+// ensureS3Mount checks if the developer's S3 bucket is set up and mounts it
+// on the running instance if not.
+func ensureS3Mount(ctx context.Context, cfg *config.Config) error {
+	ssmClient, err := vfaws.NewSSMClient(ctx, cfg.AWSProfile, cfg.Region)
+	if err != nil {
+		return err
+	}
+
+	s3Client, err := vfaws.NewS3Client(ctx, cfg.AWSProfile, cfg.Region)
+	if err != nil {
+		return err
+	}
+
+	bucketName, err := ssmClient.GetDeveloperS3Bucket(ctx, cfg.DeveloperName)
+	if err != nil {
+		return err
+	}
+
+	// If SSM param exists, verify the bucket still exists. If it was deleted
+	// externally, clean up the stale param so we recreate everything.
+	if bucketName != "" {
+		exists, err := s3Client.BucketExists(ctx, bucketName)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
+		fmt.Println("S3 bucket no longer exists. Cleaning up stale config and recreating...")
+		_ = ssmClient.DeleteDeveloperS3Bucket(ctx, cfg.DeveloperName)
+	}
+
+	fmt.Println("Setting up S3 mount for existing instance...")
+
+	provisioner := vfaws.NewProvisioner(nil, ssmClient, s3Client)
+	return provisioner.SetupS3Mount(ctx, cfg.InstanceID, cfg.DeveloperName)
 }
 
 // writeSSHConfig updates ~/.ssh/config with the clouddesktop-managed block.

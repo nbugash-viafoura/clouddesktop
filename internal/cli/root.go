@@ -22,6 +22,7 @@ func NewRootCmd() *cobra.Command {
 		NewSSHCmd(),
 		NewResizeInstanceCmd(),
 		NewResizeStorageCmd(),
+		NewS3ResetCmd(),
 		NewDestroyCmd(),
 	)
 

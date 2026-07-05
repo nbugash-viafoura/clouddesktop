@@ -37,6 +37,27 @@ func (m *mockSSMAPI) GetParameter(_ context.Context, input *ssm.GetParameterInpu
 	}, nil
 }
 
+func (m *mockSSMAPI) PutParameter(_ context.Context, input *ssm.PutParameterInput, _ ...func(*ssm.Options)) (*ssm.PutParameterOutput, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.params == nil {
+		m.params = make(map[string]string)
+	}
+	m.params[*input.Name] = *input.Value
+	return &ssm.PutParameterOutput{}, nil
+}
+
+func (m *mockSSMAPI) DeleteParameter(_ context.Context, input *ssm.DeleteParameterInput, _ ...func(*ssm.Options)) (*ssm.DeleteParameterOutput, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.params != nil {
+		delete(m.params, *input.Name)
+	}
+	return &ssm.DeleteParameterOutput{}, nil
+}
+
 func (m *mockSSMAPI) SendCommand(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
 	if m.sendCommandFn != nil {
 		return m.sendCommandFn(ctx, params, optFns...)
