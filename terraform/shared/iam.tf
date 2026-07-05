@@ -141,6 +141,40 @@ resource "aws_iam_role_policy_attachment" "codeartifact_read" {
   policy_arn = aws_iam_policy.codeartifact_read.arn
 }
 
+resource "aws_iam_policy" "s3_developer_bucket" {
+  name        = "clouddesktop-s3-developer-bucket"
+  description = "Allow CloudDesktop instances to read/write their developer S3 bucket (Mountpoint for S3)"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ]
+        Resource = [
+          "arn:aws:s3:::clouddesktop-*",
+          "arn:aws:s3:::clouddesktop-*/*"
+        ]
+      }
+    ]
+  })
+
+  tags = {
+    Name = "clouddesktop-s3-developer-bucket"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "s3_developer_bucket" {
+  role       = aws_iam_role.developer_instance.name
+  policy_arn = aws_iam_policy.s3_developer_bucket.arn
+}
+
 resource "aws_iam_instance_profile" "developer_instance" {
   name = "clouddesktop-developer-instance"
   role = aws_iam_role.developer_instance.name

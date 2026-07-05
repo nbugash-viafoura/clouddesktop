@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
@@ -37,6 +38,22 @@ func (m *mockSSMForProvisioner) GetParameter(_ context.Context, input *ssm.GetPa
 	}, nil
 }
 
+func (m *mockSSMForProvisioner) PutParameter(_ context.Context, input *ssm.PutParameterInput, _ ...func(*ssm.Options)) (*ssm.PutParameterOutput, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	m.params[*input.Name] = *input.Value
+	return &ssm.PutParameterOutput{}, nil
+}
+
+func (m *mockSSMForProvisioner) DeleteParameter(_ context.Context, input *ssm.DeleteParameterInput, _ ...func(*ssm.Options)) (*ssm.DeleteParameterOutput, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	delete(m.params, *input.Name)
+	return &ssm.DeleteParameterOutput{}, nil
+}
+
 func (m *mockSSMForProvisioner) SendCommand(_ context.Context, _ *ssm.SendCommandInput, _ ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
 	return &ssm.SendCommandOutput{}, nil
 }
@@ -52,6 +69,48 @@ func defaultSSMMock() *mockSSMForProvisioner {
 			"/clouddesktop/shared/security_group_id":     "sg-def456",
 			"/clouddesktop/shared/instance_profile_name": "clouddesktop-developer-instance",
 		},
+	}
+}
+
+// mockS3ForProvisioner implements s3api for provisioner tests.
+type mockS3ForProvisioner struct {
+	buckets map[string]bool
+}
+
+func (m *mockS3ForProvisioner) CreateBucket(_ context.Context, input *s3sdk.CreateBucketInput, _ ...func(*s3sdk.Options)) (*s3sdk.CreateBucketOutput, error) {
+	if m.buckets == nil {
+		m.buckets = make(map[string]bool)
+	}
+	m.buckets[*input.Bucket] = true
+	return &s3sdk.CreateBucketOutput{}, nil
+}
+
+func (m *mockS3ForProvisioner) HeadBucket(_ context.Context, input *s3sdk.HeadBucketInput, _ ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+	if m.buckets != nil && m.buckets[*input.Bucket] {
+		return &s3sdk.HeadBucketOutput{}, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (m *mockS3ForProvisioner) ListObjectsV2(_ context.Context, _ *s3sdk.ListObjectsV2Input, _ ...func(*s3sdk.Options)) (*s3sdk.ListObjectsV2Output, error) {
+	return &s3sdk.ListObjectsV2Output{}, nil
+}
+
+func (m *mockS3ForProvisioner) DeleteObjects(_ context.Context, _ *s3sdk.DeleteObjectsInput, _ ...func(*s3sdk.Options)) (*s3sdk.DeleteObjectsOutput, error) {
+	return &s3sdk.DeleteObjectsOutput{}, nil
+}
+
+func (m *mockS3ForProvisioner) DeleteBucket(_ context.Context, input *s3sdk.DeleteBucketInput, _ ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketOutput, error) {
+	if m.buckets != nil {
+		delete(m.buckets, *input.Bucket)
+	}
+	return &s3sdk.DeleteBucketOutput{}, nil
+}
+
+func newMockS3Client() *S3Client {
+	return &S3Client{
+		client: &mockS3ForProvisioner{buckets: make(map[string]bool)},
+		region: "us-east-1",
 	}
 }
 
@@ -86,14 +145,15 @@ func TestProvision_NewInstance(t *testing.T) {
 
 	ec2Client := newEC2ClientWithAPI(ec2Mock)
 	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient)
+	s3Client := newMockS3Client()
+	provisioner := NewProvisioner(ec2Client, ssmClient, s3Client)
 
 	result, err := provisioner.Provision(context.Background(), ProvisionParams{
 		DeveloperName: "john-dev",
 		InstanceType:  "m7i.xlarge",
 		SSHPublicKey:  "ssh-ed25519 AAAA... test@host",
 		UserData:      []byte("#!/bin/bash\necho hello"),
-	})
+			})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -129,7 +189,7 @@ func TestProvision_RecoveredInstance(t *testing.T) {
 
 	ec2Client := newEC2ClientWithAPI(ec2Mock)
 	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient)
+	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
 
 	result, err := provisioner.Provision(context.Background(), ProvisionParams{
 		DeveloperName: "john-dev",
@@ -159,7 +219,7 @@ func TestProvision_SSMError(t *testing.T) {
 
 	ec2Client := newEC2ClientWithAPI(ec2Mock)
 	ssmClient := newSSMClientWithAPI(ssmMock)
-	provisioner := NewProvisioner(ec2Client, ssmClient)
+	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
 
 	_, err := provisioner.Provision(context.Background(), ProvisionParams{
 		DeveloperName: "john-dev",
@@ -200,14 +260,15 @@ func TestProvision_RunInstanceFailure_CleansUpKeyPair(t *testing.T) {
 
 	ec2Client := newEC2ClientWithAPI(ec2Mock)
 	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient)
+	s3Client := newMockS3Client()
+	provisioner := NewProvisioner(ec2Client, ssmClient, s3Client)
 
 	_, err := provisioner.Provision(context.Background(), ProvisionParams{
 		DeveloperName: "john-dev",
 		InstanceType:  "m7i.xlarge",
 		SSHPublicKey:  "ssh-ed25519 AAAA... test@host",
 		UserData:      []byte("#!/bin/bash"),
-	})
+			})
 	if err == nil {
 		t.Fatal("expected error for RunInstance failure")
 	}
@@ -236,7 +297,7 @@ func TestDestroy_Success(t *testing.T) {
 
 	ec2Client := newEC2ClientWithAPI(ec2Mock)
 	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient)
+	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
 
 	err := provisioner.Destroy(context.Background(), "i-123", "john-dev")
 	if err != nil {
@@ -259,7 +320,7 @@ func TestDestroy_TerminateError(t *testing.T) {
 
 	ec2Client := newEC2ClientWithAPI(ec2Mock)
 	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient)
+	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
 
 	err := provisioner.Destroy(context.Background(), "i-123", "john-dev")
 	if err == nil {
@@ -281,7 +342,7 @@ func TestResize_Success(t *testing.T) {
 
 	ec2Client := newEC2ClientWithAPI(ec2Mock)
 	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient)
+	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
 
 	err := provisioner.Resize(context.Background(), "i-123", "m7i.2xlarge")
 	if err != nil {

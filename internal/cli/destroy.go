@@ -67,7 +67,12 @@ func runDestroy() error {
 		return err
 	}
 
-	provisioner := vfaws.NewProvisioner(ec2Client, ssmClient)
+	s3Client, err := vfaws.NewS3Client(ctx, cfg.AWSProfile, cfg.Region)
+	if err != nil {
+		return err
+	}
+
+	provisioner := vfaws.NewProvisioner(ec2Client, ssmClient, s3Client)
 
 	fmt.Println("Terminating instance and cleaning up resources...")
 	if err := provisioner.Destroy(ctx, cfg.InstanceID, cfg.DeveloperName); err != nil {

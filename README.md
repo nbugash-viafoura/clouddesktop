@@ -24,6 +24,7 @@ A self-service CLI tool for provisioning and managing personal cloud development
   - [Stop](#stop)
   - [Resize Instance Type](#resize-instance-type)
   - [Resize Storage](#resize-storage)
+  - [S3 Mount](#s3-mount)
   - [Destroy](#destroy)
 - [Commands Reference](#commands-reference)
 - [Daily Workflow](#daily-workflow)
@@ -50,7 +51,8 @@ Local developer machines allocate 8 CPU + 16 GB RAM to Colima(if you're using Ma
 - **Start/Stop**: subsequent `clouddesktop up` and `clouddesktop down` start and stop the instance (~30 seconds)
 - **Persist**: stopping an instance preserves the EBS volume — repos, Docker image cache, Gradle/npm caches, shell history all survive across sessions
 - **Connect**: SSH tunneled through AWS SSM Session Manager (zero open inbound ports). JetBrains Gateway and VS Code Remote SSH work transparently via the SSH config entry `clouddesktop` writes automatically
-- **Destroy**: `clouddesktop destroy --confirm` terminates the instance and deletes all data. Requires explicit confirmation.
+- **S3 Mount**: each developer gets a personal S3 bucket mounted at `/home/ubuntu/s3` via [Mountpoint for Amazon S3](https://github.com/awslabs/mountpoint-s3). Files published to the bucket are visible as local files for ETL workloads. The mount persists across instance stop/start cycles.
+- **Destroy**: `clouddesktop destroy --confirm` terminates the instance and deletes all data (including the S3 bucket). Requires explicit confirmation.
 
 ### Cost
 
@@ -192,6 +194,8 @@ clouddesktop up
 
 On first run, this provisions an EC2 instance (~2 minutes for infrastructure, ~10 minutes for bootstrap). On subsequent runs, it starts the existing stopped instance (~30 seconds).
 
+On first run, `clouddesktop up` also creates a personal S3 bucket (`clouddesktop-<your-name>-<account-id>`) and mounts it at `/home/ubuntu/s3`. For existing instances that predate this feature, running `clouddesktop up` will automatically set up the S3 mount.
+
 After the instance is running, `clouddesktop up` automatically writes an SSH config entry to `~/.ssh/config`:
 
 ```
@@ -261,13 +265,39 @@ clouddesktop resize-storage
 
 Grows the root EBS volume online — no instance stop required. Presents a picker of supported sizes larger than the current volume (100, 200, 300, 500, 1024, 1536, 2048 GB), then automatically extends the filesystem via SSM. Hard cap is 2 TB; EBS volumes cannot be shrunk.
 
+### S3 Mount
+
+Each developer gets a personal S3 bucket mounted at `/home/ubuntu/s3` using [Mountpoint for Amazon S3](https://github.com/awslabs/mountpoint-s3). This is set up automatically during `clouddesktop up`.
+
+**Use cases:**
+- Receive files published to the bucket by other systems or teammates for ETL processing
+- Persist large datasets that don't need to live on the EBS volume
+- Share output files by writing to `/home/ubuntu/s3`
+
+**Behavior:**
+- The bucket is created automatically on first `clouddesktop up`
+- The mount survives `clouddesktop down` / `clouddesktop up` cycles (fstab auto-remounts on boot)
+- Files uploaded to the S3 bucket externally (console, CLI, other services) appear immediately on the instance
+- The bucket and all its contents are deleted on `clouddesktop destroy`
+- Existing instances that predate this feature get the mount automatically on the next `clouddesktop up`
+
+**Uploading files to a developer's bucket externally:**
+```bash
+aws s3 cp data.csv s3://clouddesktop-<developer-name>/data.csv --profile test-developers
+```
+
+**Limitations (Mountpoint for S3):**
+- No in-place modification of existing files (write-once; delete and rewrite to update)
+- No file locking, symlinks, or `chmod`/`chown`
+- Reads and new file writes work normally
+
 ### Destroy
 
 ```bash
 clouddesktop destroy --confirm
 ```
 
-Permanently terminates the instance and deletes all associated resources (EBS volume, key pair). The `--confirm` flag is required. After destroying, run `clouddesktop init` to start fresh.
+Permanently terminates the instance and deletes all associated resources (EBS volume, key pair, S3 bucket and its contents). The `--confirm` flag is required. After destroying, run `clouddesktop init` to start fresh.
 
 ## Commands Reference
 
@@ -306,6 +336,7 @@ The bootstrap script (`scripts/bootstrap-system.sh`) runs automatically on first
 | ECR credential helper | Latest | `docker pull` from ECR works without manual login |
 | zsh + oh-my-zsh | Latest | Default shell |
 | tmux, git, make, jq | Latest | Standard tooling |
+| Mountpoint for S3 | Latest | Mounts personal S3 bucket at `/home/ubuntu/s3` |
 | CloudWatch Agent | Latest | Publishes CPU, memory, disk metrics |
 | SSM Agent | Pre-installed | Enables SSH via SSM Session Manager |
 
@@ -322,11 +353,20 @@ Developer Laptop                         AWS (us-east-1)
 | clouddesktop CLI|                      |   Node.js + npm/pnpm      |
 +-----------------+                      |   Claude Code CLI         |
                                          |   100 GB gp3 EBS          |
+                                         |   /home/ubuntu/s3 (mount) |
+                                         +---------------------------+
+                                                    |
+                                                    | Mountpoint for S3
+                                                    v
+                                         +---------------------------+
+                                         | S3 Bucket (per developer) |
+                                         | clouddesktop-<name>-<id>  |
                                          +---------------------------+
                                          | IAM Instance Profile      |
                                          |   - SSM access            |
                                          |   - ECR read-only         |
                                          |   - CloudWatch metrics    |
+                                         |   - S3 bucket access      |
                                          +---------------------------+
                                          | Security Group            |
                                          |   - Zero inbound rules    |
@@ -345,7 +385,7 @@ clouddesktop/
   cmd/clouddesktop/main.go       # CLI entry point
   internal/
     cli/                         # One file per command
-    aws/                         # AWS SDK clients (EC2, SSM, CloudWatch, STS, provisioner)
+    aws/                         # AWS SDK clients (EC2, SSM, S3, CloudWatch, STS, provisioner)
     config/                      # ~/.clouddesktop/config.yaml read/write
     version/                     # Build-time version info (injected via ldflags)
   terraform/
@@ -374,7 +414,9 @@ Tier 1 creates the resources that all developer instances share: IAM instance pr
 | DynamoDB table | Prevents concurrent Terraform operations on shared infra |
 | IAM role + instance profile (`clouddesktop-developer-instance`) | Grants EC2 instances access to SSM, CloudWatch, and ECR (read-only) |
 | Security group (`clouddesktop-developer-instance`) | Zero inbound rules, all outbound allowed. Created in the Development VPC. Attached to every developer instance. |
-| SSM parameters (4) | Stores SG ID, instance profile name, VPC ID, and subnet ID for the CLI to reference at provisioning time |
+| SSM parameters (shared: 4) | Stores SG ID, instance profile name, VPC ID, and subnet ID for the CLI to reference at provisioning time |
+| SSM parameters (per-developer) | Stores S3 bucket name per developer (`/clouddesktop/developer/<name>/s3_bucket_name`) |
+| S3 buckets (per-developer) | Created dynamically by `clouddesktop up`, named `clouddesktop-<name>`. Deleted by `clouddesktop destroy`. |
 
 **Steps:**
 
@@ -457,6 +499,20 @@ tail -f /var/log/bootstrap-system.log
 
 **SSH connection refused**
 Ensure the SSM Session Manager plugin is installed (`session-manager-plugin`). Also verify the instance is running with `clouddesktop status`.
+
+**S3 mount not working or `/home/ubuntu/s3` is empty**
+
+If the mount didn't activate during provision (e.g., bootstrap was still running), run `clouddesktop up` again. The CLI will detect the missing mount and configure it via SSM. You can also verify manually on the instance:
+
+```bash
+mountpoint /home/ubuntu/s3       # Should say "is a mountpoint"
+ls /home/ubuntu/s3               # Should list bucket contents
+```
+
+If the mount is not present, re-mount manually:
+```bash
+sudo mount-s3 --allow-delete --allow-overwrite --uid 1000 --gid 1000 clouddesktop-<your-name>-<account-id> /home/ubuntu/s3
+```
 
 ### SSH Agent Forwarding Issues
 

@@ -6,10 +6,11 @@ import (
 )
 
 // Provisioner orchestrates EC2 instance lifecycle operations (provision, destroy, resize)
-// using the EC2Client and SSMClient for shared infrastructure configuration.
+// using the EC2Client, SSMClient, and S3Client for shared infrastructure configuration.
 type Provisioner struct {
 	ec2Client *EC2Client
 	ssmClient *SSMClient
+	s3Client  *S3Client
 }
 
 // ProvisionParams holds the parameters needed to provision a new cloud desktop.
@@ -26,11 +27,12 @@ type ProvisionResult struct {
 	Recovered  bool // true if an existing orphaned instance was recovered
 }
 
-// NewProvisioner creates a new Provisioner with the given EC2 and SSM clients.
-func NewProvisioner(ec2Client *EC2Client, ssmClient *SSMClient) *Provisioner {
+// NewProvisioner creates a new Provisioner with the given EC2, SSM, and S3 clients.
+func NewProvisioner(ec2Client *EC2Client, ssmClient *SSMClient, s3Client *S3Client) *Provisioner {
 	return &Provisioner{
 		ec2Client: ec2Client,
 		ssmClient: ssmClient,
+		s3Client:  s3Client,
 	}
 }
 
@@ -69,6 +71,16 @@ func (p *Provisioner) Provision(ctx context.Context, params ProvisionParams) (*P
 		return nil, err
 	}
 
+	// Create S3 bucket for the developer.
+	bucketName := BucketName(params.DeveloperName)
+	if err := p.s3Client.CreateBucket(ctx, bucketName); err != nil {
+		return nil, fmt.Errorf("failed to create S3 bucket: %w", err)
+	}
+
+	if err := p.ssmClient.PutDeveloperS3Bucket(ctx, params.DeveloperName, bucketName); err != nil {
+		return nil, fmt.Errorf("failed to store S3 bucket param: %w", err)
+	}
+
 	// Launch instance.
 	instanceID, err := p.ec2Client.RunInstance(ctx, RunInstanceParams{
 		AMIID:               amiID,
@@ -92,18 +104,51 @@ func (p *Provisioner) Provision(ctx context.Context, params ProvisionParams) (*P
 	}, nil
 }
 
-// Destroy terminates an EC2 instance and cleans up the associated key pair.
-// Both operations are best-effort to ensure maximum cleanup.
+// Destroy terminates an EC2 instance and cleans up the associated key pair and S3 bucket.
+// All cleanup operations are best-effort to ensure maximum cleanup.
 func (p *Provisioner) Destroy(ctx context.Context, instanceID, developerName string) error {
 	if err := p.ec2Client.TerminateInstance(ctx, instanceID); err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
 	}
 
 	keyName := "clouddesktop-" + developerName
-	// Best-effort key pair cleanup -- don't fail if already gone.
 	_ = p.ec2Client.DeleteSSHKeyPair(ctx, keyName)
 
+	// Best-effort S3 bucket cleanup.
+	bucketName, err := p.ssmClient.GetDeveloperS3Bucket(ctx, developerName)
+	if err == nil && bucketName != "" {
+		_ = p.s3Client.EmptyBucket(ctx, bucketName)
+		_ = p.s3Client.DeleteBucket(ctx, bucketName)
+		_ = p.ssmClient.DeleteDeveloperS3Bucket(ctx, developerName)
+	}
+
 	return nil
+}
+
+// SetupS3Mount creates the S3 bucket (if needed) and sends an SSM command to mount it
+// on an already-running instance. Used for existing instances that predate this feature.
+func (p *Provisioner) SetupS3Mount(ctx context.Context, instanceID, developerName string) error {
+	bucketName, err := p.ssmClient.GetDeveloperS3Bucket(ctx, developerName)
+	if err != nil {
+		return err
+	}
+
+	if bucketName == "" {
+		bucketName = BucketName(developerName)
+		if err := p.s3Client.CreateBucket(ctx, bucketName); err != nil {
+			return fmt.Errorf("failed to create S3 bucket: %w", err)
+		}
+		if err := p.ssmClient.PutDeveloperS3Bucket(ctx, developerName, bucketName); err != nil {
+			return fmt.Errorf("failed to store S3 bucket param: %w", err)
+		}
+	}
+
+	cmdID, err := p.ssmClient.RunS3Mount(ctx, instanceID, bucketName)
+	if err != nil {
+		return err
+	}
+
+	return p.ssmClient.WaitUntilCommandComplete(ctx, instanceID, cmdID)
 }
 
 // Resize changes the instance type of a stopped EC2 instance.
