@@ -21,11 +21,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.version || github.ref }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # go.mod is the single source of truth, so a future Go bump does not
           # need a matching edit in every workflow.
@@ -35,7 +35,7 @@ jobs:
         run: make test
 
       - name: Run linter
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
@@ -43,12 +43,12 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.version || github.ref }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # go.mod is the single source of truth, so a future Go bump does not
           # need a matching edit in every workflow.
@@ -68,6 +68,24 @@ jobs:
       - name: Generate checksums
         run: make checksums
 
+      # gh release create --generate-notes cannot append anything of its own, so
+      # the notes are generated through the API and .github/release-install.md is
+      # appended before the release is created. That file holds the install
+      # instructions and uses __VERSION__ wherever the tag belongs; keep any
+      # explanatory notes about it here rather than in the file, since every
+      # __VERSION__ occurrence in it gets substituted.
+      - name: Compose release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "/repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$VERSION" \
+            --jq '.body' > release-notes.md
+          printf '\n\n' >> release-notes.md
+          sed "s|__VERSION__|${VERSION}|g" .github/release-install.md >> release-notes.md
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -75,6 +93,6 @@ jobs:
         run: |
           gh release create "$VERSION" \
             --title "$VERSION" \
-            --generate-notes \
+            --notes-file release-notes.md \
             dist/*.tar.gz \
             dist/checksums.txt

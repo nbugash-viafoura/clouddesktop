@@ -398,6 +398,7 @@ clouddesktop/
     embed.go                     # Embeds scripts into the binary
   .github/
     release.yml                  # Groups auto-generated release notes by scope label
+    release-install.md           # Install instructions appended to every release body
     workflows/pr-checks.yml      # Required PR gates: scope label, tests, lint
     workflows/auto-release.yml   # Tags and releases on every merge to master
     workflows/release.yml        # Builds and publishes a release for a tag
@@ -429,7 +430,7 @@ Merging a PR into `master` publishes a release. There is no manual tagging step:
 3. It creates an annotated tag on the PR's merge commit and pushes it
 4. It calls `release.yml`, which re-runs tests and lint, cross-compiles for `linux/amd64`, `darwin/amd64`, and `darwin/arm64`, generates `checksums.txt`, and publishes the GitHub Release
 
-Release notes are generated from merged PR titles and grouped by scope label per `.github/release.yml`.
+Release notes are generated from merged PR titles and grouped by scope label per `.github/release.yml`. The contents of `.github/release-install.md` are then appended, with `__VERSION__` replaced by the tag, so every release body carries copy-pasteable install commands for all three platforms. Edit that file to change the install instructions — it needs no workflow change.
 
 Because every merge releases, a docs-only change still produces a new patch version. That is intentional — the version always identifies exactly what is on `master`.
 

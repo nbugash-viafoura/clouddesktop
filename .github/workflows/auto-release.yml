@@ -24,7 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.bump.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history so the tag list is available, and the merge commit
           # itself so the tag lands on exactly what this PR produced rather
