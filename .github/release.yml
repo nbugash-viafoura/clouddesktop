@@ -1,0 +1,16 @@
+# Groups the notes that --generate-notes produces for each release, keyed off
+# the scope: label every PR is required to carry.
+changelog:
+  categories:
+    - title: Breaking Changes
+      labels:
+        - "scope:major"
+    - title: Features
+      labels:
+        - "scope:minor"
+    - title: Fixes and Maintenance
+      labels:
+        - "scope:patch"
+    - title: Other Changes
+      labels:
+        - "*"
