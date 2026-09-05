@@ -62,7 +62,13 @@ Compute cost is incurred only while the instance is running. Stopped instances o
 |---|---|---|---|
 | `m7i.xlarge` (4 vCPU, 16 GB) | ~$44 | ~$8 | ~$52 |
 | `m7i.2xlarge` (8 vCPU, 32 GB) | ~$89 | ~$8 | ~$97 |
+| `r7i.2xlarge` (8 vCPU, 64 GB) | ~$116 | ~$8 | ~$124 |
 | `m7i.4xlarge` (16 vCPU, 64 GB) | ~$177 | ~$8 | ~$185 |
+| `r7i.4xlarge` (16 vCPU, 128 GB) | ~$233 | ~$8 | ~$241 |
+| `m7i.8xlarge` (32 vCPU, 128 GB) | ~$355 | ~$8 | ~$363 |
+| `m7i.12xlarge` (48 vCPU, 192 GB) | ~$532 | ~$8 | ~$540 |
+
+If you need more than 64 GB of RAM but not the extra cores, prefer the `r7i` family — it gives 8 GB per vCPU instead of 4, so `r7i.4xlarge` reaches 128 GB at roughly two-thirds the cost of `m7i.8xlarge`.
 
 ## Prerequisites
 

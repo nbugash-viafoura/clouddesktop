@@ -161,6 +161,10 @@ func TestValidateInstanceType(t *testing.T) {
 	}{
 		{"valid m7i.xlarge", "m7i.xlarge", false},
 		{"valid m7i.2xlarge", "m7i.2xlarge", false},
+		{"valid m7i.8xlarge", "m7i.8xlarge", false},
+		{"valid m7i.12xlarge", "m7i.12xlarge", false},
+		{"valid r7i.2xlarge", "r7i.2xlarge", false},
+		{"valid r7i.4xlarge", "r7i.4xlarge", false},
 		{"valid t3.large", "t3.large", false},
 		{"invalid instance type", "invalid.large", true},
 		{"empty instance type", "", true},
