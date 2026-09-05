@@ -51,19 +51,24 @@ type InstanceTypeOption struct {
 
 // ValidInstanceTypes is the single source of truth for supported EC2 instance types (amd64 only).
 var ValidInstanceTypes = []InstanceTypeOption{
-	// m7i family (latest gen, Intel)
-	{Label: "m7i.large   ( 2 vCPU,   8 GB)", Value: "m7i.large"},
-	{Label: "m7i.xlarge  ( 4 vCPU,  16 GB)", Value: "m7i.xlarge"},
-	{Label: "m7i.2xlarge ( 8 vCPU,  32 GB)", Value: "m7i.2xlarge"},
-	{Label: "m7i.4xlarge (16 vCPU,  64 GB)", Value: "m7i.4xlarge"},
+	// m7i family (latest gen, Intel, general purpose - 4 GB per vCPU)
+	{Label: "m7i.large    ( 2 vCPU,   8 GB)", Value: "m7i.large"},
+	{Label: "m7i.xlarge   ( 4 vCPU,  16 GB)", Value: "m7i.xlarge"},
+	{Label: "m7i.2xlarge  ( 8 vCPU,  32 GB)", Value: "m7i.2xlarge"},
+	{Label: "m7i.4xlarge  (16 vCPU,  64 GB)", Value: "m7i.4xlarge"},
+	{Label: "m7i.8xlarge  (32 vCPU, 128 GB)", Value: "m7i.8xlarge"},
+	{Label: "m7i.12xlarge (48 vCPU, 192 GB)", Value: "m7i.12xlarge"},
+	// r7i family (latest gen, Intel, memory optimized - 8 GB per vCPU)
+	{Label: "r7i.2xlarge  ( 8 vCPU,  64 GB)", Value: "r7i.2xlarge"},
+	{Label: "r7i.4xlarge  (16 vCPU, 128 GB)", Value: "r7i.4xlarge"},
 	// m6i family (prev gen, Intel)
-	{Label: "m6i.large   ( 2 vCPU,   8 GB)", Value: "m6i.large"},
-	{Label: "m6i.xlarge  ( 4 vCPU,  16 GB)", Value: "m6i.xlarge"},
-	{Label: "m6i.2xlarge ( 8 vCPU,  32 GB)", Value: "m6i.2xlarge"},
+	{Label: "m6i.large    ( 2 vCPU,   8 GB)", Value: "m6i.large"},
+	{Label: "m6i.xlarge   ( 4 vCPU,  16 GB)", Value: "m6i.xlarge"},
+	{Label: "m6i.2xlarge  ( 8 vCPU,  32 GB)", Value: "m6i.2xlarge"},
 	// t3 family (burstable, Intel)
-	{Label: "t3.large    ( 2 vCPU,   8 GB)", Value: "t3.large"},
-	{Label: "t3.xlarge   ( 4 vCPU,  16 GB)", Value: "t3.xlarge"},
-	{Label: "t3.2xlarge  ( 8 vCPU,  32 GB)", Value: "t3.2xlarge"},
+	{Label: "t3.large     ( 2 vCPU,   8 GB)", Value: "t3.large"},
+	{Label: "t3.xlarge    ( 4 vCPU,  16 GB)", Value: "t3.xlarge"},
+	{Label: "t3.2xlarge   ( 8 vCPU,  32 GB)", Value: "t3.2xlarge"},
 }
 
 // isValidInstanceType checks if the given instance type is in the supported list.

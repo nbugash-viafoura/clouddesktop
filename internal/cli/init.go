@@ -87,8 +87,8 @@ func runInit() error {
 
 	cfg.AWSProfile = awsProfile
 
-	// Instance type (select)
-	var instanceType string
+	// Instance type (select), defaulting to m7i.xlarge.
+	instanceType := "m7i.xlarge"
 	instanceTypeOptions := make([]huh.Option[string], len(config.ValidInstanceTypes))
 	for i, it := range config.ValidInstanceTypes {
 		instanceTypeOptions[i] = huh.NewOption(it.Label, it.Value)
