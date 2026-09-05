@@ -103,7 +103,7 @@ apt install awscli
 Verify your AWS profile is configured. `clouddesktop init` defaults to the `test-terraform` profile, but you can select any configured profile during setup:
 
 ```bash
-aws sts get-caller-identity --profile test-terraform
+aws sts get-caller-identity --profile test-terraform   # substitute your own profile if you use a different one
 ```
 
 If your session has expired, run `sts` to refresh MFA credentials first.
@@ -319,7 +319,7 @@ aws s3 cp data.csv s3://clouddesktop-<developer-name>/data.csv --profile test-de
 clouddesktop s3-reset --confirm
 ```
 
-Deletes the developer's S3 bucket (and all its contents), removes the backing SSM parameter, and clears the mount configuration. The next `clouddesktop up` creates a fresh bucket and re-mounts it at `/home/ubuntu/s3`. Use this if the bucket is in a bad state or you want to start over with empty S3 storage. The `--confirm` flag is required because it deletes all bucket contents. The EC2 instance and its EBS data are untouched.
+Deletes the developer's S3 bucket (and all its contents) and removes the backing SSM parameter. This is an AWS-side operation only — it does not unmount anything on the instance, so an existing `/home/ubuntu/s3` mount keeps pointing at a bucket that no longer exists until the next `clouddesktop up`, which creates a fresh bucket and re-runs mount setup. Use this if the bucket is in a bad state or you want to start over with empty S3 storage. The `--confirm` flag is required because it deletes all bucket contents. The EC2 instance and its EBS data are untouched.
 
 ### Destroy
 
