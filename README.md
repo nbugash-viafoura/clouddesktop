@@ -8,6 +8,7 @@ A self-service CLI tool for provisioning and managing personal cloud development
 
 - [Why](#why)
 - [How It Works](#how-it-works)
+  - [Auto-Stop](#auto-stop)
   - [Cost](#cost)
 - [Prerequisites](#prerequisites)
   - [1. AWS CLI v2](#1-aws-cli-v2)
@@ -25,6 +26,7 @@ A self-service CLI tool for provisioning and managing personal cloud development
   - [Resize Instance Type](#resize-instance-type)
   - [Resize Storage](#resize-storage)
   - [S3 Mount](#s3-mount)
+  - [Reset S3 Bucket](#reset-s3-bucket)
   - [Destroy](#destroy)
 - [Commands Reference](#commands-reference)
 - [Daily Workflow](#daily-workflow)
@@ -54,15 +56,31 @@ Local developer machines allocate 8 CPU + 16 GB RAM to Colima(if you're using Ma
 - **S3 Mount**: each developer gets a personal S3 bucket mounted at `/home/ubuntu/s3` via [Mountpoint for Amazon S3](https://github.com/awslabs/mountpoint-s3). Files published to the bucket are visible as local files for ETL workloads. The mount persists across instance stop/start cycles.
 - **Destroy**: `clouddesktop destroy --confirm` terminates the instance and deletes all data (including the S3 bucket). Requires explicit confirmation.
 
+### Auto-Stop
+
+Each instance runs a systemd timer (`clouddesktop-autostop`) that checks for activity every 15 minutes and **shuts the instance down after roughly 4 hours of inactivity**. This protects against forgotten running instances. An instance is considered active if any of the following is true:
+
+- An established SSH connection on port 22 (e.g. an open terminal, JetBrains Gateway, or VS Code Remote SSH session)
+- A login session in `who`
+- A running `tmux` or `screen` session (so detached long-running work is not interrupted)
+
+After an auto-stop, your data is preserved on the EBS volume — run `clouddesktop up` to start the instance again (~30 seconds). The idle check does not run until the first-boot bootstrap has completed.
+
 ### Cost
 
-Compute cost is incurred only while the instance is running. Stopped instances only incur EBS storage cost.
+Compute cost is incurred only while the instance is running (and an idle instance auto-stops after ~4 hours — see [Auto-Stop](#auto-stop)). Stopped instances only incur EBS storage cost.
 
 | Instance type | Running (10h/day, 22 days/month) | Stopped (EBS only) | Monthly estimate |
 |---|---|---|---|
 | `m7i.xlarge` (4 vCPU, 16 GB) | ~$44 | ~$8 | ~$52 |
 | `m7i.2xlarge` (8 vCPU, 32 GB) | ~$89 | ~$8 | ~$97 |
+| `r7i.2xlarge` (8 vCPU, 64 GB) | ~$116 | ~$8 | ~$124 |
 | `m7i.4xlarge` (16 vCPU, 64 GB) | ~$177 | ~$8 | ~$185 |
+| `r7i.4xlarge` (16 vCPU, 128 GB) | ~$233 | ~$8 | ~$241 |
+| `m7i.8xlarge` (32 vCPU, 128 GB) | ~$355 | ~$8 | ~$363 |
+| `m7i.12xlarge` (48 vCPU, 192 GB) | ~$532 | ~$8 | ~$540 |
+
+If you need more than 64 GB of RAM but not the extra cores, prefer the `r7i` family — it gives 8 GB per vCPU instead of 4, so `r7i.4xlarge` reaches 128 GB at roughly two-thirds the cost of `m7i.8xlarge`.
 
 ## Prerequisites
 
@@ -82,10 +100,10 @@ Ubuntu
 apt install awscli
 ```
 
-Verify your AWS profile is configured. `clouddesktop` uses the `test-developers` profile by default:
+Verify your AWS profile is configured. `clouddesktop init` defaults to the `test-terraform` profile, but you can select any configured profile during setup:
 
 ```bash
-aws sts get-caller-identity --profile test-developers
+aws sts get-caller-identity --profile test-terraform   # substitute your own profile if you use a different one
 ```
 
 If your session has expired, run `sts` to refresh MFA credentials first.
@@ -178,9 +196,9 @@ clouddesktop init
 
 Prompts for:
 - **Developer name** — lowercase, used in AWS resource naming (e.g., `john`)
-- **AWS profile** — default: `test-terraform`
-- **Instance type** — default: `m7i.xlarge` (4 vCPU, 16 GB)
-- **SSH public key path** — default: `~/.ssh/id_ed25519.pub`
+- **AWS profile** — picker of your configured AWS profiles; defaults to `test-terraform`
+- **Instance type** — picker of supported types; defaults to `m7i.xlarge` (4 vCPU, 16 GB)
+- **SSH public key** — picker of the `.pub` keys found in `~/.ssh/`
 
 Region is fixed to `us-east-1`.
 
@@ -194,21 +212,25 @@ clouddesktop up
 
 On first run, this provisions an EC2 instance (~2 minutes for infrastructure, ~10 minutes for bootstrap). On subsequent runs, it starts the existing stopped instance (~30 seconds).
 
-On first run, `clouddesktop up` also creates a personal S3 bucket (`clouddesktop-<your-name>-<account-id>`) and mounts it at `/home/ubuntu/s3`. For existing instances that predate this feature, running `clouddesktop up` will automatically set up the S3 mount.
+On first run, `clouddesktop up` also creates a personal S3 bucket (`clouddesktop-<your-name>`) and mounts it at `/home/ubuntu/s3`. For existing instances that predate this feature, running `clouddesktop up` will automatically set up the S3 mount.
 
 After the instance is running, `clouddesktop up` automatically writes an SSH config entry to `~/.ssh/config`:
 
 ```
+# BEGIN clouddesktop managed block
 Host clouddesktop
   HostName <instance-id>
   User ubuntu
   IdentityFile ~/.ssh/<your-key>
   ForwardAgent yes
-  ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p --profile test-developers --region us-east-1
+  ProxyCommand ~/.ssh/clouddesktop-ssm-proxy.sh %h %p
   ServerAliveInterval 60
   ServerAliveCountMax 3
   StrictHostKeyChecking accept-new
+# END clouddesktop managed block
 ```
+
+The `ProxyCommand` points at a generated wrapper script (`~/.ssh/clouddesktop-ssm-proxy.sh`) rather than an inline command. The wrapper resolves the absolute paths to `aws` and `session-manager-plugin`, then runs `aws ssm start-session` against your instance using the AWS profile and region from your config. The block is delimited by the `# BEGIN/END clouddesktop managed block` markers so the CLI can update it in place without disturbing the rest of `~/.ssh/config` (your existing config is backed up to `~/.ssh/config.clouddesktop-backup` on each write).
 
 ### Connect
 
@@ -291,6 +313,14 @@ aws s3 cp data.csv s3://clouddesktop-<developer-name>/data.csv --profile test-de
 - No file locking, symlinks, or `chmod`/`chown`
 - Reads and new file writes work normally
 
+### Reset S3 Bucket
+
+```bash
+clouddesktop s3-reset --confirm
+```
+
+Deletes the developer's S3 bucket (and all its contents) and removes the backing SSM parameter. This is an AWS-side operation only — it does not unmount anything on the instance, so an existing `/home/ubuntu/s3` mount keeps pointing at a bucket that no longer exists until the next `clouddesktop up`, which creates a fresh bucket and re-runs mount setup. Use this if the bucket is in a bad state or you want to start over with empty S3 storage. The `--confirm` flag is required because it deletes all bucket contents. The EC2 instance and its EBS data are untouched.
+
 ### Destroy
 
 ```bash
@@ -310,6 +340,7 @@ Permanently terminates the instance and deletes all associated resources (EBS vo
 | `clouddesktop ssh` | Open SSH session to instance |
 | `clouddesktop resize-instance` | Change instance type interactively |
 | `clouddesktop resize-storage` | Grow root EBS volume and extend filesystem online |
+| `clouddesktop s3-reset --confirm` | Delete and recreate the S3 bucket and mount |
 | `clouddesktop destroy --confirm` | Permanently delete instance and all data |
 
 ## Daily Workflow
@@ -360,7 +391,7 @@ Developer Laptop                         AWS (us-east-1)
                                                     v
                                          +---------------------------+
                                          | S3 Bucket (per developer) |
-                                         | clouddesktop-<name>-<id>  |
+                                         | clouddesktop-<name>       |
                                          +---------------------------+
                                          | IAM Instance Profile      |
                                          |   - SSM access            |
@@ -384,9 +415,10 @@ Each developer's instance configuration is stored locally in `~/.clouddesktop/co
 clouddesktop/
   cmd/clouddesktop/main.go       # CLI entry point
   internal/
-    cli/                         # One file per command
+    cli/                         # One file per command (init, up, down, status, ssh, resize, resize-storage, s3-reset, destroy)
     aws/                         # AWS SDK clients (EC2, SSM, S3, CloudWatch, STS, provisioner)
     config/                      # ~/.clouddesktop/config.yaml read/write
+    testing/                     # Mock AWS clients used by unit tests
     version/                     # Build-time version info (injected via ldflags)
   terraform/
     shared/                      # One-time shared infra (IAM, SG, SSM params, state backend)
@@ -511,7 +543,7 @@ ls /home/ubuntu/s3               # Should list bucket contents
 
 If the mount is not present, re-mount manually:
 ```bash
-sudo mount-s3 --allow-delete --allow-overwrite --uid 1000 --gid 1000 clouddesktop-<your-name>-<account-id> /home/ubuntu/s3
+sudo mount-s3 --allow-delete --allow-overwrite --allow-other --uid 1000 --gid 1000 clouddesktop-<your-name> /home/ubuntu/s3
 ```
 
 ### SSH Agent Forwarding Issues
