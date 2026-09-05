@@ -161,7 +161,7 @@ Verify with `clouddesktop --version`.
 
 ### Build from source
 
-Requires Go 1.23+:
+Requires Go 1.24+ (matching the `go` directive in `go.mod`):
 
 ```bash
 git clone git@github.com:nbugash-viafoura/clouddesktop.git
@@ -416,9 +416,9 @@ Every pull request into `master` must carry **exactly one** of these labels:
 | `scope:minor` | `1.2.3` -> `1.3.0` | Backward-compatible features — new commands, new instance types, new flags |
 | `scope:patch` | `1.2.3` -> `1.2.4` | Fixes, docs, dependency bumps, refactors with no user-visible behaviour change |
 
-The `scope-label` check fails without one, and it is a required status check, so **the merge button stays disabled until a scope label is applied**. Two scope labels also fail — the version bump has to be unambiguous.
+The `scope-label` check fails when no scope label is present, and fails again when two are — the version bump has to be unambiguous. `test` and `lint` run alongside it on every PR.
 
-Alongside it, `test` and `lint` run on every PR and are also required.
+The workflow reports the failure; what turns that into a blocked merge is branch protection. All three checks (`scope-label`, `test`, `lint`) must be marked as **required status checks** on `master` under Settings > Branches. Without that, an unlabelled PR shows a red check but the merge button still works — and merging it leaves `auto-release` unable to derive a version, so the release is skipped.
 
 ### Releases Are Automatic
 

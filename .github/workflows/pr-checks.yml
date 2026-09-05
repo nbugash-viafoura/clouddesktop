@@ -49,7 +49,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          # go.mod is the single source of truth, so a future Go bump does not
+          # need a matching edit in every workflow.
+          go-version-file: go.mod
 
       - name: Run tests
         run: make test
@@ -62,7 +64,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          # go.mod is the single source of truth, so a future Go bump does not
+          # need a matching edit in every workflow.
+          go-version-file: go.mod
 
       - name: Run linter
         uses: golangci/golangci-lint-action@v6
