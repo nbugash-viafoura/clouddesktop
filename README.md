@@ -34,6 +34,9 @@ A self-service CLI tool for provisioning and managing personal cloud development
 - [Architecture](#architecture)
   - [Instance State](#instance-state)
 - [Repository Structure](#repository-structure)
+- [Contributing](#contributing)
+  - [Scope Labels Are Mandatory](#scope-labels-are-mandatory)
+  - [Releases Are Automatic](#releases-are-automatic)
 - [Deployment (Admin Only)](#deployment-admin-only)
   - [Shared Infrastructure (Tier 1)](#shared-infrastructure-tier-1)
   - [Verifying the Deployment](#verifying-the-deployment)
@@ -176,7 +179,7 @@ Verify with `clouddesktop --version`.
 
 ### Build from source
 
-Requires Go 1.23+:
+Requires Go 1.24+ (matching the `go` directive in `go.mod`):
 
 ```bash
 git clone git@github.com:nbugash-viafoura/clouddesktop.git
@@ -426,9 +429,50 @@ clouddesktop/
     bootstrap-system.sh          # System tooling (embedded, runs via user_data on first provision)
     embed.go                     # Embeds scripts into the binary
   .github/
-    workflows/release.yml        # Builds and publishes releases on tag push
+    release.yml                  # Groups auto-generated release notes by scope label
+    release-install.md           # Install instructions appended to every release body
+    workflows/pr-checks.yml      # Required PR gates: scope label, tests, lint
+    workflows/auto-release.yml   # Tags and releases on every merge to master
+    workflows/release.yml        # Builds and publishes a release for a tag
   Makefile
 ```
+
+## Contributing
+
+### Scope Labels Are Mandatory
+
+Every pull request into `master` must carry **exactly one** of these labels:
+
+| Label | Bump | Use for |
+|---|---|---|
+| `scope:major` | `1.2.3` -> `2.0.0` | Breaking changes — a removed command or flag, a config format change, anything that breaks an existing `~/.clouddesktop/config.yaml` |
+| `scope:minor` | `1.2.3` -> `1.3.0` | Backward-compatible features — new commands, new instance types, new flags |
+| `scope:patch` | `1.2.3` -> `1.2.4` | Fixes, docs, dependency bumps, refactors with no user-visible behaviour change |
+
+The `scope-label` check fails when no scope label is present, and fails again when two are — the version bump has to be unambiguous. `test` and `lint` run alongside it on every PR.
+
+The workflow reports the failure; what turns that into a blocked merge is branch protection. All three checks (`scope-label`, `test`, `lint`) must be marked as **required status checks** on `master` under Settings > Branches. Without that, an unlabelled PR shows a red check but the merge button still works — and merging it leaves `auto-release` unable to derive a version, so the release is skipped.
+
+### Releases Are Automatic
+
+Merging a PR into `master` publishes a release. There is no manual tagging step:
+
+1. `auto-release.yml` reads the merged PR's scope label
+2. It computes the next version from the highest existing `v*.*.*` tag
+3. It creates an annotated tag on the PR's merge commit and pushes it
+4. It calls `release.yml`, which re-runs tests and lint, cross-compiles for `linux/amd64`, `darwin/amd64`, and `darwin/arm64`, generates `checksums.txt`, and publishes the GitHub Release
+
+Release notes are generated from merged PR titles and grouped by scope label per `.github/release.yml`. The contents of `.github/release-install.md` are then appended, with `__VERSION__` replaced by the tag, so every release body carries copy-pasteable install commands for all three platforms. Edit that file to change the install instructions — it needs no workflow change.
+
+Because every merge releases, a docs-only change still produces a new patch version. That is intentional — the version always identifies exactly what is on `master`.
+
+To publish a tag by hand (backfilling a release, or recovering from a failed run), push the tag directly and `release.yml` picks it up:
+
+```bash
+git tag -a v1.4.2 -m "v1.4.2" && git push origin v1.4.2
+```
+
+Note that a release run happens *after* the merge, so a failure there means `master` is already updated but no artifacts were published. Fix forward and push a tag by hand, or re-run the failed workflow.
 
 ## Deployment (Admin Only)
 

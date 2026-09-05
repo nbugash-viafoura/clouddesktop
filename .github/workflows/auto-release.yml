@@ -1,0 +1,104 @@
+name: Auto Release
+
+# Every merged PR into master produces a tag and a GitHub Release. The version
+# bump comes from the PR's scope: label, which pr-checks.yml makes mandatory.
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+permissions:
+  contents: write
+
+# Two PRs merged close together would otherwise race on reading the latest tag
+# and could compute the same version. Serialise instead of cancelling: a
+# cancelled run would skip a release for an already-merged PR.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the tag list is available, and the merge commit
+          # itself so the tag lands on exactly what this PR produced rather
+          # than on a master tip that a later merge may have moved.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Determine bump from scope label
+        id: scope
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          found=""
+          for level in major minor patch; do
+            case ",${LABELS}," in
+              *",scope:${level},"*)
+                if [ -n "$found" ]; then
+                  echo "::error::PR carries both scope:${found} and scope:${level}, so the version bump is ambiguous."
+                  exit 1
+                fi
+                found="$level"
+                ;;
+            esac
+          done
+          if [ -z "$found" ]; then
+            echo "::error::Merged PR has no scope: label, so no version can be derived. Label the PR and re-run this workflow to publish the release."
+            exit 1
+          fi
+          echo "bump=${found}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: bump
+        env:
+          BUMP: ${{ steps.scope.outputs.bump }}
+        run: |
+          set -euo pipefail
+          latest="$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1)"
+          [ -n "$latest" ] || latest="v0.0.0"
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          version="v${major}.${minor}.${patch}"
+          echo "${latest} + ${BUMP} -> ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "### Release \`${version}\` (${BUMP} bump from \`${latest}\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create and push tag
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            echo "::error::Tag ${VERSION} already exists. Resolve the tag history before re-running."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" -m "${VERSION} - ${PR_TITLE} (#${PR_NUMBER})" "${MERGE_SHA}"
+          git push origin "refs/tags/${VERSION}"
+
+  # A tag pushed with GITHUB_TOKEN does not trigger release.yml's push trigger,
+  # so the release workflow is invoked directly instead of relying on the tag
+  # event. This keeps one copy of the build-and-publish logic.
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    with:
+      version: ${{ needs.tag.outputs.version }}

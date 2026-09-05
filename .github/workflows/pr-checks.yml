@@ -1,0 +1,74 @@
+name: PR Checks
+
+# Gates every pull request into master. The scope-label job is what makes the
+# scope: label mandatory -- auto-release.yml reads that label after merge to
+# decide the version bump, so a PR without one has no releasable version.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  scope-label:
+    name: scope-label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require exactly one scope label
+        env:
+          # Passed through the environment rather than interpolated into the
+          # script body so label text can never be executed as shell.
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          found=""
+          for level in major minor patch; do
+            case ",${LABELS}," in
+              *",scope:${level},"*)
+                if [ -n "$found" ]; then
+                  echo "::error::PR carries both scope:${found} and scope:${level}. Exactly one scope label is required."
+                  exit 1
+                fi
+                found="$level"
+                ;;
+            esac
+          done
+          if [ -z "$found" ]; then
+            echo "::error::Missing scope label. Add exactly one of scope:major, scope:minor, or scope:patch. It determines the version bump for the release published automatically on merge."
+            exit 1
+          fi
+          echo "scope:${found} - merging this PR will publish a ${found} release."
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # go.mod is the single source of truth, so a future Go bump does not
+          # need a matching edit in every workflow.
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: make test
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # go.mod is the single source of truth, so a future Go bump does not
+          # need a matching edit in every workflow.
+          go-version-file: go.mod
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest

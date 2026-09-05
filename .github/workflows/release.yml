@@ -1,9 +1,18 @@
 name: Release
 
+# Two entry points:
+#   push tag  - a tag pushed by hand (e.g. an out-of-band or backfilled release)
+#   call      - auto-release.yml, after it has created the tag for a merged PR
 on:
   push:
     tags:
       - "v*"
+  workflow_call:
+    inputs:
+      version:
+        description: Existing tag to build and publish, e.g. v1.2.0
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -12,17 +21,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: "1.23"
+          ref: ${{ inputs.version || github.ref }}
+
+      - uses: actions/setup-go@v7
+        with:
+          # go.mod is the single source of truth, so a future Go bump does not
+          # need a matching edit in every workflow.
+          go-version-file: go.mod
 
       - name: Run tests
         run: make test
 
       - name: Run linter
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
@@ -30,30 +43,56 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ inputs.version || github.ref }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.23"
+          # go.mod is the single source of truth, so a future Go bump does not
+          # need a matching edit in every workflow.
+          go-version-file: go.mod
 
-      - name: Extract version from tag
+      - name: Resolve version
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: echo "VERSION=${INPUT_VERSION:-$GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Build all platforms
-        run: make build-all VERSION=${{ steps.version.outputs.VERSION }}
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: make build-all VERSION="$VERSION"
 
       - name: Generate checksums
         run: make checksums
 
+      # gh release create --generate-notes cannot append anything of its own, so
+      # the notes are generated through the API and .github/release-install.md is
+      # appended before the release is created. That file holds the install
+      # instructions and uses __VERSION__ wherever the tag belongs; keep any
+      # explanatory notes about it here rather than in the file, since every
+      # __VERSION__ occurrence in it gets substituted.
+      - name: Compose release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "/repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$VERSION" \
+            --jq '.body' > release-notes.md
+          printf '\n\n' >> release-notes.md
+          sed "s|__VERSION__|${VERSION}|g" .github/release-install.md >> release-notes.md
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          gh release create "${{ steps.version.outputs.VERSION }}" \
-            --title "${{ steps.version.outputs.VERSION }}" \
-            --generate-notes \
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --notes-file release-notes.md \
             dist/*.tar.gz \
             dist/checksums.txt
