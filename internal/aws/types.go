@@ -13,6 +13,7 @@ const (
 	ErrorTypeRateLimit
 	ErrorTypeInvalidInput
 	ErrorTypeServiceUnavailable
+	ErrorTypeCapacity
 )
 
 // AWSError is a custom error type that wraps AWS SDK errors with context.
@@ -51,6 +52,8 @@ func (e *AWSError) Remediation() string {
 		return "AWS API rate limit exceeded. Wait a few seconds and retry."
 	case ErrorTypeServiceUnavailable:
 		return fmt.Sprintf("%s is temporarily unavailable. Try again in a few moments.", e.Service)
+	case ErrorTypeCapacity:
+		return "Stop environments you aren't using, ask the platform team to raise the limit, or choose another instance type."
 	default:
 		return "Check AWS CloudTrail logs for more details."
 	}

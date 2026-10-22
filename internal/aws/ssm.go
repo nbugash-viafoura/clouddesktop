@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
@@ -14,6 +15,10 @@ import (
 
 const (
 	ssmPollInitialInterval = 3 * time.Second
+
+	// ssmSendRetryLimit bounds how long SendCommand is retried while an
+	// instance's SSM agent reconnects after a start.
+	ssmSendRetryLimit = 3 * time.Minute
 )
 
 // ssmapi is the subset of the AWS SSM SDK client used by SSMClient.
@@ -31,6 +36,10 @@ type SSMClient struct {
 	client              ssmapi
 	pollInitialInterval time.Duration
 	pollMaxInterval     time.Duration
+
+	sendRetryInitialInterval time.Duration
+	sendRetryMaxInterval     time.Duration
+	sendRetryLimit           time.Duration
 }
 
 // SharedInfraConfig holds the shared infrastructure parameters set by Tier 1 Terraform.
@@ -76,18 +85,24 @@ func NewSSMClient(ctx context.Context, profile, region string) (*SSMClient, erro
 	}
 
 	return &SSMClient{
-		client:              ssm.NewFromConfig(cfg),
-		pollInitialInterval: ssmPollInitialInterval,
-		pollMaxInterval:     pollMaxInterval,
+		client:                   ssm.NewFromConfig(cfg),
+		pollInitialInterval:      ssmPollInitialInterval,
+		pollMaxInterval:          pollMaxInterval,
+		sendRetryInitialInterval: pollInitialInterval,
+		sendRetryMaxInterval:     pollMaxInterval,
+		sendRetryLimit:           ssmSendRetryLimit,
 	}, nil
 }
 
 // newSSMClientWithAPI creates an SSMClient with a custom API implementation (for testing).
 func newSSMClientWithAPI(api ssmapi) *SSMClient {
 	return &SSMClient{
-		client:              api,
-		pollInitialInterval: ssmPollInitialInterval,
-		pollMaxInterval:     pollMaxInterval,
+		client:                   api,
+		pollInitialInterval:      ssmPollInitialInterval,
+		pollMaxInterval:          pollMaxInterval,
+		sendRetryInitialInterval: pollInitialInterval,
+		sendRetryMaxInterval:     pollMaxInterval,
+		sendRetryLimit:           ssmSendRetryLimit,
 	}
 }
 
@@ -198,10 +213,25 @@ func isParameterNotFoundError(err error) bool {
 	return strings.Contains(err.Error(), "ParameterNotFound")
 }
 
-// RunS3Mount sends a command to install mount-s3 and mount the bucket on the instance.
-func (c *SSMClient) RunS3Mount(ctx context.Context, instanceID, bucketName string) (string, error) {
-	script := fmt.Sprintf(`#!/usr/bin/env bash
+// s3MountScript installs mount-s3 if needed and mounts the bucket at
+// /home/ubuntu/s3, adding an fstab entry so the mount survives reboots. It does
+// nothing when the right bucket is already mounted and responding, and fails
+// with "bootstrap in progress" on stderr while first-boot setup is still running.
+const s3MountScript = `#!/usr/bin/env bash
 set -euo pipefail
+
+BUCKET=%s
+MOUNT_DIR=/home/ubuntu/s3
+
+if [[ ! -f /var/log/bootstrap-system-complete ]]; then
+    echo "bootstrap in progress" >&2
+    exit 1
+fi
+
+# Nothing to do when the right bucket is already mounted and responding.
+if mountpoint -q "$MOUNT_DIR" && timeout 10 ls "$MOUNT_DIR" >/dev/null 2>&1 && grep -q "^${BUCKET} ${MOUNT_DIR} " /etc/fstab; then
+    exit 0
+fi
 
 # Install Mountpoint for Amazon S3 if not present
 if ! command -v mount-s3 &>/dev/null; then
@@ -213,40 +243,84 @@ fi
 # Enable FUSE allow_other
 grep -q user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf
 
-# Unmount stale FUSE mount if present
-if mountpoint -q /home/ubuntu/s3 2>/dev/null; then
-    umount /home/ubuntu/s3 || fusermount -u /home/ubuntu/s3 || true
+# Unmount a stale FUSE mount if present
+if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
+    umount "$MOUNT_DIR" || fusermount -u "$MOUNT_DIR" || true
 fi
 
 # Create mount point and set ownership
-mkdir -p /home/ubuntu/s3
-chown ubuntu:ubuntu /home/ubuntu/s3
+mkdir -p "$MOUNT_DIR"
+chown ubuntu:ubuntu "$MOUNT_DIR"
 
 # Mount the bucket
-mount-s3 --allow-delete --allow-overwrite --allow-other --uid 1000 --gid 1000 %s /home/ubuntu/s3
+mount-s3 --allow-delete --allow-overwrite --allow-other --uid 1000 --gid 1000 "$BUCKET" "$MOUNT_DIR"
 
-# Remove any stale fstab entries for /home/ubuntu/s3
-sed -i '\|/home/ubuntu/s3|d' /etc/fstab
+# Remove any stale fstab entries for the mount point
+sed -i "\\|${MOUNT_DIR}|d" /etc/fstab
 
 # Add fstab entry for auto-mount on boot
-echo '%s /home/ubuntu/s3 fuse.mount-s3 _netdev,allow_other,allow_delete,allow_overwrite,uid=1000,gid=1000 0 0' >> /etc/fstab`, bucketName, bucketName)
+echo "${BUCKET} ${MOUNT_DIR} fuse.mount-s3 _netdev,allow_other,allow_delete,allow_overwrite,uid=1000,gid=1000 0 0" >> /etc/fstab`
 
-	output, err := c.client.SendCommand(ctx, &ssm.SendCommandInput{
-		DocumentName: strPtr("AWS-RunShellScript"),
-		InstanceIds:  []string{instanceID},
-		Parameters: map[string][]string{
-			"commands": {script},
-		},
-	})
+// RunS3Mount sends a command that makes sure the bucket is mounted on the instance.
+func (c *SSMClient) RunS3Mount(ctx context.Context, instanceID, bucketName string) (string, error) {
+	commandID, err := c.sendCommand(ctx, instanceID, fmt.Sprintf(s3MountScript, bucketName))
 	if err != nil {
 		return "", fmt.Errorf("failed to send S3 mount command to instance %s: %w", instanceID, err)
 	}
+	return commandID, nil
+}
 
-	if output.Command == nil || output.Command.CommandId == nil {
-		return "", fmt.Errorf("SendCommand returned no command ID")
+// sendCommand runs a shell script on the instance through AWS-RunShellScript.
+// Right after an instance starts, its SSM agent may not have reconnected yet and
+// SendCommand fails with InvalidInstanceId, so that error is retried with
+// exponential backoff until sendRetryLimit has passed.
+func (c *SSMClient) sendCommand(ctx context.Context, instanceID, script string) (string, error) {
+	deadline := time.Now().Add(c.sendRetryLimit)
+	interval := c.sendRetryInitialInterval
+	announced := false
+
+	for {
+		output, err := c.client.SendCommand(ctx, &ssm.SendCommandInput{
+			DocumentName: strPtr("AWS-RunShellScript"),
+			InstanceIds:  []string{instanceID},
+			Parameters: map[string][]string{
+				"commands": {script},
+			},
+		})
+		if err == nil {
+			if output.Command == nil || output.Command.CommandId == nil {
+				return "", fmt.Errorf("SendCommand returned no command ID")
+			}
+			return *output.Command.CommandId, nil
+		}
+		if !isInstanceNotReachableError(err) {
+			return "", err
+		}
+		if time.Now().Add(interval).After(deadline) {
+			return "", fmt.Errorf("SSM can't reach instance %s yet: %w", instanceID, err)
+		}
+		if !announced {
+			fmt.Println("Waiting for SSM to reach the instance...")
+			announced = true
+		}
+
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(interval):
+		}
+
+		interval *= 2
+		if interval > c.sendRetryMaxInterval {
+			interval = c.sendRetryMaxInterval
+		}
 	}
+}
 
-	return *output.Command.CommandId, nil
+// isInstanceNotReachableError reports whether SendCommand failed because the
+// instance's SSM agent is not connected yet.
+func isInstanceNotReachableError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InvalidInstanceId")
 }
 
 // isInvocationNotFoundError reports whether the error is the SSM InvocationDoesNotExist
@@ -262,22 +336,11 @@ func isInvocationNotFoundError(err error) bool {
 // RunFilesystemExtension sends AWS-RunShellScript to grow the root partition
 // and resize the ext4 filesystem. Returns the SSM command ID.
 func (c *SSMClient) RunFilesystemExtension(ctx context.Context, instanceID string) (string, error) {
-	output, err := c.client.SendCommand(ctx, &ssm.SendCommandInput{
-		DocumentName: strPtr("AWS-RunShellScript"),
-		InstanceIds:  []string{instanceID},
-		Parameters: map[string][]string{
-			"commands": {filesystemExtensionScript},
-		},
-	})
+	commandID, err := c.sendCommand(ctx, instanceID, filesystemExtensionScript)
 	if err != nil {
 		return "", fmt.Errorf("failed to send filesystem extension command to instance %s: %w", instanceID, err)
 	}
-
-	if output.Command == nil || output.Command.CommandId == nil {
-		return "", fmt.Errorf("SendCommand returned no command ID")
-	}
-
-	return *output.Command.CommandId, nil
+	return commandID, nil
 }
 
 // WaitUntilCommandComplete polls GetCommandInvocation until a terminal status
@@ -316,6 +379,9 @@ func (c *SSMClient) WaitUntilCommandComplete(ctx context.Context, instanceID, co
 				ssmtypes.CommandInvocationStatusTimedOut,
 				ssmtypes.CommandInvocationStatusCancelled,
 				ssmtypes.CommandInvocationStatusCancelling:
+				if detail := strings.TrimSpace(aws.ToString(output.StandardErrorContent)); detail != "" {
+					return fmt.Errorf("SSM command %s finished with status: %s: %s", commandID, output.Status, detail)
+				}
 				return fmt.Errorf("SSM command %s finished with status: %s", commandID, output.Status)
 			}
 		}

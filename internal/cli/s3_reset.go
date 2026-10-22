@@ -2,27 +2,24 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
-	"github.com/nbugash-viafoura/clouddesktop/internal/config"
+	"github.com/nbugash-viafoura/clouddesktop/internal/environment"
 	"github.com/spf13/cobra"
 )
 
-// NewS3ResetCmd returns the s3-reset command which deletes and recreates the S3 mount.
+// NewS3ResetCmd returns the s3-reset command which deletes the developer's S3 bucket.
 func NewS3ResetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "s3-reset",
 		Short: "Delete and recreate the S3 bucket and mount",
-		Long:  "Deletes the developer's S3 bucket (and all its contents), removes the SSM parameter, and recreates everything from scratch. The next 'clouddesktop up' will set up a fresh mount.",
+		Long:  "Deletes the developer's S3 bucket (and all its contents) and removes the SSM parameter. The bucket is shared by all of your environments; each one gets a fresh bucket and mount on its next 'clouddesktop up'. Without --confirm, it only shows which environments would be affected.",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			confirm, _ := cmd.Flags().GetBool("confirm")
-			if !confirm {
-				return errors.New("use --confirm to acknowledge this deletes all S3 bucket contents")
-			}
-			return runS3Reset()
+			return runS3Reset(confirm)
 		},
 	}
 
@@ -31,30 +28,16 @@ func NewS3ResetCmd() *cobra.Command {
 	return cmd
 }
 
-func runS3Reset() error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-
+func runS3Reset(confirmed bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if err := vfaws.ValidateSession(ctx, cfg.AWSProfile, cfg.Region); err != nil {
-		return err
-	}
-
-	ssmClient, err := vfaws.NewSSMClient(ctx, cfg.AWSProfile, cfg.Region)
+	s, err := openSession(ctx)
 	if err != nil {
 		return err
 	}
 
-	s3Client, err := vfaws.NewS3Client(ctx, cfg.AWSProfile, cfg.Region)
-	if err != nil {
-		return err
-	}
-
-	bucketName, err := ssmClient.GetDeveloperS3Bucket(ctx, cfg.DeveloperName)
+	bucketName, err := s.ssm.GetDeveloperS3Bucket(ctx, s.cfg.DeveloperName)
 	if err != nil {
 		return err
 	}
@@ -64,31 +47,52 @@ func runS3Reset() error {
 		return nil
 	}
 
-	fmt.Printf("Deleting S3 bucket: %s\n", bucketName)
+	fmt.Printf("This deletes bucket %s and all its contents.\n", bucketName)
+	fmt.Printf("Environments that use it: %s\n", describeEnvironments(s.envs))
 
-	exists, err := s3Client.BucketExists(ctx, bucketName)
+	if !confirmed {
+		return fmt.Errorf("re-run with --confirm to delete bucket %s", bucketName)
+	}
+
+	exists, err := s.s3.BucketExists(ctx, bucketName)
 	if err != nil {
 		return err
 	}
 
 	if exists {
 		fmt.Println("Emptying bucket...")
-		if err := s3Client.EmptyBucket(ctx, bucketName); err != nil {
+		if err := s.s3.EmptyBucket(ctx, bucketName); err != nil {
 			return fmt.Errorf("failed to empty bucket: %w", err)
 		}
 
-		if err := s3Client.DeleteBucket(ctx, bucketName); err != nil {
+		if err := s.s3.DeleteBucket(ctx, bucketName); err != nil {
 			return fmt.Errorf("failed to delete bucket: %w", err)
 		}
 	} else {
 		fmt.Println("Bucket already deleted externally.")
 	}
 
-	if err := ssmClient.DeleteDeveloperS3Bucket(ctx, cfg.DeveloperName); err != nil {
+	if err := s.ssm.DeleteDeveloperS3Bucket(ctx, s.cfg.DeveloperName); err != nil {
 		return fmt.Errorf("failed to remove SSM parameter: %w", err)
 	}
 
 	fmt.Println("S3 bucket and configuration removed.")
-	fmt.Println("Run 'clouddesktop up' to create a fresh bucket and mount.")
+	if len(s.envs) > 0 {
+		fmt.Println("Their mount will be repaired on their next 'clouddesktop up'.")
+	} else {
+		fmt.Println("Your next environment gets a fresh bucket.")
+	}
 	return nil
+}
+
+// describeEnvironments lists environments with their state, e.g. "main (running), build (stopped)".
+func describeEnvironments(envs []environment.Environment) string {
+	if len(envs) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(envs))
+	for _, env := range envs {
+		parts = append(parts, fmt.Sprintf("%s (%s)", env.Name, env.State))
+	}
+	return strings.Join(parts, ", ")
 }

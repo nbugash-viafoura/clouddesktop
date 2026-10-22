@@ -7,251 +7,110 @@ import (
 
 	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
 	"github.com/nbugash-viafoura/clouddesktop/internal/config"
-	"github.com/nbugash-viafoura/clouddesktop/scripts"
+	"github.com/nbugash-viafoura/clouddesktop/internal/environment"
 	"github.com/spf13/cobra"
 )
 
 // NewUpCmd returns the up command which starts or provisions the cloud desktop.
 func NewUpCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "up",
+		Use:   "up [name]",
 		Short: "Start or provision cloud desktop",
-		Long:  "Provisions a new cloud desktop instance if one doesn't exist, or starts an existing stopped instance. Developer identity is read from the config file.",
+		Long:  "Starts an environment if it is stopped, refreshes its SSH config entry, and makes sure your personal S3 bucket is mounted on it. Without a name, it uses your only environment or your default. If you have no environments yet, it provisions one named \"main\".",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runUp()
+			return runUp(nameArg(args))
 		},
 	}
 }
 
-func runUp() error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-
+func runUp(name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	if err := vfaws.ValidateSession(ctx, cfg.AWSProfile, cfg.Region); err != nil {
-		return err
-	}
-
-	// If no instance ID exists in config, this is a first-time provision.
-	if cfg.InstanceID == "" {
-		return runProvision(ctx, cfg)
-	}
-
-	return runStart(ctx, cfg)
-}
-
-// runProvision handles first-time instance creation using the AWS SDK directly.
-func runProvision(ctx context.Context, cfg *config.Config) error {
-	fmt.Println("No existing instance found. Provisioning a new cloud desktop...")
-	fmt.Println()
-
-	ec2Client, err := vfaws.NewEC2Client(ctx, cfg.AWSProfile, cfg.Region)
+	s, err := openSession(ctx)
 	if err != nil {
 		return err
 	}
 
-	ssmClient, err := vfaws.NewSSMClient(ctx, cfg.AWSProfile, cfg.Region)
+	env, err := s.resolve(name, environment.OperationGeneral)
 	if err != nil {
-		return err
-	}
-
-	s3Client, err := vfaws.NewS3Client(ctx, cfg.AWSProfile, cfg.Region)
-	if err != nil {
-		return err
-	}
-
-	provisioner := vfaws.NewProvisioner(ec2Client, ssmClient, s3Client)
-
-	fmt.Printf("Provisioning instance (type: %s)...\n", cfg.InstanceType)
-	result, err := provisioner.Provision(ctx, vfaws.ProvisionParams{
-		DeveloperName: cfg.DeveloperName,
-		InstanceType:  cfg.InstanceType,
-		SSHPublicKey:  cfg.SSHPublicKey,
-		UserData:      scripts.BootstrapSystem,
-	})
-	if err != nil {
-		return fmt.Errorf("provisioning failed: %w", err)
-	}
-
-	cfg.InstanceID = result.InstanceID
-	if err := config.Save(cfg); err != nil {
-		return fmt.Errorf("failed to save instance ID to config: %w", err)
-	}
-
-	if result.Recovered {
-		fmt.Printf("Recovered existing instance %s.\n", result.InstanceID)
-	} else {
-		fmt.Printf("Instance %s created. Waiting for it to start...\n", result.InstanceID)
-	}
-
-	if err := ec2Client.WaitUntilRunning(ctx, result.InstanceID); err != nil {
-		return fmt.Errorf("timed out waiting for instance to start: %w", err)
-	}
-
-	if err := writeSSHConfig(ctx, ec2Client, cfg); err != nil {
-		return err
-	}
-
-	if !result.Recovered {
-		fmt.Println()
-		fmt.Println("Waiting for bootstrap to complete (this takes ~10 minutes on first provision)...")
-		fmt.Println("You can check progress: clouddesktop ssh, then 'tail -f /var/log/bootstrap-system.log'")
-		fmt.Println()
-		fmt.Println("S3 bucket created. The mount will be configured once bootstrap completes.")
-		fmt.Println("Run 'clouddesktop up' again after bootstrap to activate the S3 mount at /home/ubuntu/s3")
-	} else {
-		// For recovered instances, set up S3 mount if not already configured.
-		if err := provisioner.SetupS3Mount(ctx, result.InstanceID, cfg.DeveloperName); err != nil {
-			fmt.Printf("Warning: S3 mount setup failed: %s\n", err)
-			fmt.Println("  You can retry with 'clouddesktop up' once the instance is ready.")
+		// With no environments and no name, keep today's first-run behavior.
+		if name == "" && environment.IsKind(err, environment.NoEnvironments) {
+			fmt.Println("No existing instance found. Provisioning a new cloud desktop...")
+			fmt.Println()
+			return provisionEnvironment(ctx, s, environment.LegacyName, s.cfg.InstanceType, defaultStorageSizeGB)
 		}
-	}
-
-	info, err := ec2Client.DescribeInstance(ctx, result.InstanceID)
-	if err != nil {
 		return err
 	}
 
-	fmt.Println()
-	fmt.Println("Cloud desktop is running.")
-	printInstanceSummary(info, cfg)
-
-	return nil
+	return runStart(ctx, s, env)
 }
 
-// runStart handles starting an already-provisioned but stopped instance.
-func runStart(ctx context.Context, cfg *config.Config) error {
-	ec2Client, err := vfaws.NewEC2Client(ctx, cfg.AWSProfile, cfg.Region)
-	if err != nil {
-		return err
-	}
+// runStart starts an already-provisioned environment if needed, then refreshes
+// its SSH config entry and S3 mount.
+func runStart(ctx context.Context, s *session, env environment.Environment) error {
+	printTarget(env)
 
-	info, err := ec2Client.DescribeInstance(ctx, cfg.InstanceID)
-	if err != nil {
-		return err
-	}
-
-	switch info.State {
+	switch env.State {
 	case "running":
 		fmt.Println("Cloud desktop is already running.")
 	case "stopped":
-		fmt.Printf("Starting instance %s...\n", cfg.InstanceID)
-		if err := ec2Client.StartInstance(ctx, cfg.InstanceID); err != nil {
+		fmt.Printf("Starting instance %s...\n", env.InstanceID)
+		if err := s.ec2.StartInstance(ctx, env.InstanceID); err != nil {
 			return err
 		}
-		if err := ec2Client.WaitUntilRunning(ctx, cfg.InstanceID); err != nil {
+		if err := s.ec2.WaitUntilRunning(ctx, env.InstanceID); err != nil {
 			return fmt.Errorf("timed out waiting for instance to start: %w", err)
 		}
 	case "pending":
 		fmt.Println("Instance is already starting. Waiting...")
-		if err := ec2Client.WaitUntilRunning(ctx, cfg.InstanceID); err != nil {
+		if err := s.ec2.WaitUntilRunning(ctx, env.InstanceID); err != nil {
 			return fmt.Errorf("timed out waiting for instance to start: %w", err)
 		}
 	case "stopping":
-		fmt.Println("Instance is currently stopping. Wait for it to stop, then run 'clouddesktop up' again.")
-		return nil
-	case "terminated":
-		fmt.Println("Instance has been terminated. Run 'clouddesktop destroy --confirm' to clean up, then 'clouddesktop init' to start fresh.")
+		fmt.Printf("Instance is currently stopping. Wait for it to stop, then run 'clouddesktop up %s' again.\n", env.Name)
 		return nil
 	default:
-		return fmt.Errorf("instance is in unexpected state: %s", info.State)
+		return fmt.Errorf("instance is in unexpected state: %s", env.State)
 	}
 
 	// Always ensure SSH config is up to date when the instance is running.
-	if err := writeSSHConfig(ctx, ec2Client, cfg); err != nil {
+	if err := s.syncSSHConfig(ctx); err != nil {
 		return err
 	}
 
-	// Set up S3 mount if not already configured for this developer.
-	if err := ensureS3Mount(ctx, cfg); err != nil {
-		fmt.Printf("Warning: S3 mount setup failed: %s\n", err)
-		fmt.Println("  You can retry with 'clouddesktop up' once the instance is ready.")
-	}
+	ensureS3Mount(ctx, s, env.Name, env.InstanceID)
 
-	info, err = ec2Client.DescribeInstance(ctx, cfg.InstanceID)
+	info, err := s.ec2.DescribeInstance(ctx, env.InstanceID)
 	if err != nil {
 		return err
 	}
 	fmt.Println("Cloud desktop is running.")
-	printInstanceSummary(info, cfg)
+	printInstanceSummary(env.Name, info, s.cfg)
 	return nil
 }
 
-// ensureS3Mount checks if the developer's S3 bucket is set up and mounts it
-// on the running instance if not.
-func ensureS3Mount(ctx context.Context, cfg *config.Config) error {
-	ssmClient, err := vfaws.NewSSMClient(ctx, cfg.AWSProfile, cfg.Region)
-	if err != nil {
-		return err
+// ensureS3Mount makes sure the developer's bucket is mounted on the instance.
+// A failure is reported as a warning: the environment itself is usable.
+func ensureS3Mount(ctx context.Context, s *session, envName, instanceID string) {
+	fmt.Printf("Setting up S3 mount on %s...\n", envName)
+	if err := s.provisioner().EnsureS3Mount(ctx, instanceID, s.cfg.DeveloperName); err != nil {
+		fmt.Printf("Warning: S3 mount setup failed: %s\n", err)
+		fmt.Printf("  You can retry with 'clouddesktop up %s' once the instance is ready.\n", envName)
 	}
-
-	s3Client, err := vfaws.NewS3Client(ctx, cfg.AWSProfile, cfg.Region)
-	if err != nil {
-		return err
-	}
-
-	bucketName, err := ssmClient.GetDeveloperS3Bucket(ctx, cfg.DeveloperName)
-	if err != nil {
-		return err
-	}
-
-	// If SSM param exists, verify the bucket still exists. If it was deleted
-	// externally, clean up the stale param so we recreate everything.
-	if bucketName != "" {
-		exists, err := s3Client.BucketExists(ctx, bucketName)
-		if err != nil {
-			return err
-		}
-		if exists {
-			return nil
-		}
-		fmt.Println("S3 bucket no longer exists. Cleaning up stale config and recreating...")
-		_ = ssmClient.DeleteDeveloperS3Bucket(ctx, cfg.DeveloperName)
-	}
-
-	fmt.Println("Setting up S3 mount for existing instance...")
-
-	provisioner := vfaws.NewProvisioner(nil, ssmClient, s3Client)
-	return provisioner.SetupS3Mount(ctx, cfg.InstanceID, cfg.DeveloperName)
-}
-
-// writeSSHConfig updates ~/.ssh/config with the clouddesktop-managed block.
-func writeSSHConfig(ctx context.Context, ec2Client *vfaws.EC2Client, cfg *config.Config) error {
-	info, err := ec2Client.DescribeInstance(ctx, cfg.InstanceID)
-	if err != nil {
-		return fmt.Errorf("failed to get instance info for SSH config: %w", err)
-	}
-
-	entry := vfaws.SSHConfigEntry{
-		HostAlias:    "clouddesktop",
-		InstanceID:   info.InstanceID,
-		User:         "ubuntu",
-		IdentityFile: cfg.SSHKeyPath,
-		AWSProfile:   cfg.AWSProfile,
-		Region:       cfg.Region,
-	}
-	if err := vfaws.WriteSSHConfig(entry); err != nil {
-		return fmt.Errorf("failed to update SSH config: %w", err)
-	}
-
-	fmt.Println("SSH config updated. Connect with: ssh clouddesktop")
-	return nil
 }
 
 // printInstanceSummary prints a formatted summary of the instance.
-func printInstanceSummary(info *vfaws.InstanceInfo, cfg *config.Config) {
+func printInstanceSummary(envName string, info *vfaws.InstanceInfo, cfg *config.Config) {
 	fmt.Println()
+	fmt.Printf("  Environment:   %s\n", envName)
 	fmt.Printf("  Instance ID:   %s\n", info.InstanceID)
 	fmt.Printf("  State:         %s\n", info.State)
 	fmt.Printf("  Type:          %s\n", info.InstanceType)
 	if info.PrivateIP != "" {
 		fmt.Printf("  Private IP:    %s\n", info.PrivateIP)
 	}
-	fmt.Printf("  SSH:           ssh clouddesktop\n")
+	fmt.Printf("  SSH:           ssh %s\n", environment.SSHAlias(envName))
 	fmt.Printf("  Profile:       %s\n", cfg.AWSProfile)
 }
-

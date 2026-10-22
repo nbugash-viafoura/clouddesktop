@@ -6,56 +6,44 @@ import (
 	"time"
 
 	"github.com/charmbracelet/huh"
-	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
 	"github.com/nbugash-viafoura/clouddesktop/internal/config"
+	"github.com/nbugash-viafoura/clouddesktop/internal/environment"
 	"github.com/spf13/cobra"
 )
 
 // NewResizeStorageCmd returns the resize-storage command which increases the root EBS volume size.
 func NewResizeStorageCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "resize-storage",
+		Use:   "resize-storage [name]",
 		Short: "Increase root disk storage",
-		Long:  "Increases the root EBS volume size. Presents a list of supported sizes larger than the current volume, applies the change online (no stop required), then extends the filesystem automatically.",
-		Args:  cobra.NoArgs,
+		Long:  "Increases an environment's root EBS volume size. Presents a list of supported sizes larger than the current volume, applies the change online (no stop required), then extends the filesystem automatically. Without a name, it uses your only environment or your default.",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runResizeStorage()
+			return runResizeStorage(nameArg(args))
 		},
 	}
 }
 
-func runResizeStorage() error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-
-	if cfg.InstanceID == "" {
-		return fmt.Errorf("no instance provisioned. Run 'clouddesktop up' first")
-	}
-
+func runResizeStorage(name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	if err := vfaws.ValidateSession(ctx, cfg.AWSProfile, cfg.Region); err != nil {
-		return err
-	}
-
-	ec2Client, err := vfaws.NewEC2Client(ctx, cfg.AWSProfile, cfg.Region)
+	s, err := openSession(ctx)
 	if err != nil {
 		return err
 	}
 
-	info, err := ec2Client.DescribeInstance(ctx, cfg.InstanceID)
+	env, err := s.resolve(name, environment.OperationGeneral)
 	if err != nil {
 		return err
 	}
+	printTarget(env)
 
-	if info.State != "running" {
-		return fmt.Errorf("instance is not running. Start your instance first with 'clouddesktop up'")
+	if env.State != "running" {
+		return fmt.Errorf("instance is not running. Start it first with 'clouddesktop up %s'", env.Name)
 	}
 
-	volumeID, currentSizeGB, err := ec2Client.GetRootVolumeInfo(ctx, cfg.InstanceID)
+	volumeID, currentSizeGB, err := s.ec2.GetRootVolumeInfo(ctx, env.InstanceID)
 	if err != nil {
 		return err
 	}
@@ -77,7 +65,7 @@ func runResizeStorage() error {
 	selectForm := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[int]().
-				Title(fmt.Sprintf("Root volume size (current: %d GB)", currentSizeGB)).
+				Title(fmt.Sprintf("Root volume size for %s (current: %d GB)", env.Name, currentSizeGB)).
 				Options(sizeOptions...).
 				Value(&newSizeGB),
 		),
@@ -93,34 +81,24 @@ func runResizeStorage() error {
 	}
 
 	fmt.Printf("Modifying root volume %s to %d GB...\n", volumeID, newSizeGB)
-	if err := ec2Client.ModifyRootVolume(ctx, volumeID, int32(newSizeGB)); err != nil {
+	if err := s.ec2.ModifyRootVolume(ctx, volumeID, int32(newSizeGB)); err != nil {
 		return fmt.Errorf("failed to resize volume: %w", err)
 	}
 
 	fmt.Println("Waiting for volume resize to complete...")
-	if err := ec2Client.WaitUntilVolumeResized(ctx, volumeID); err != nil {
+	if err := s.ec2.WaitUntilVolumeResized(ctx, volumeID); err != nil {
 		return fmt.Errorf("error waiting for volume resize: %w", err)
 	}
 
-	ssmClient, err := vfaws.NewSSMClient(ctx, cfg.AWSProfile, cfg.Region)
-	if err != nil {
-		return err
-	}
-
 	fmt.Println("Extending filesystem to use new storage...")
-	commandID, err := ssmClient.RunFilesystemExtension(ctx, cfg.InstanceID)
+	commandID, err := s.ssm.RunFilesystemExtension(ctx, env.InstanceID)
 	if err != nil {
 		return fmt.Errorf("failed to run filesystem extension: %w", err)
 	}
 
 	fmt.Printf("Waiting for filesystem extension to complete (command: %s)...\n", commandID)
-	if err := ssmClient.WaitUntilCommandComplete(ctx, cfg.InstanceID, commandID); err != nil {
+	if err := s.ssm.WaitUntilCommandComplete(ctx, env.InstanceID, commandID); err != nil {
 		return fmt.Errorf("filesystem extension failed: %w", err)
-	}
-
-	cfg.RootVolumeSizeGB = newSizeGB
-	if err := config.Save(cfg); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	fmt.Printf("Storage resize complete. Root volume is now %d GB.\n", newSizeGB)

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -19,6 +18,7 @@ import (
 type mockSSMForProvisioner struct {
 	params map[string]string
 	err    error
+	sentTo []string // instance IDs that received a command
 }
 
 func (m *mockSSMForProvisioner) GetParameter(_ context.Context, input *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
@@ -54,8 +54,9 @@ func (m *mockSSMForProvisioner) DeleteParameter(_ context.Context, input *ssm.De
 	return &ssm.DeleteParameterOutput{}, nil
 }
 
-func (m *mockSSMForProvisioner) SendCommand(_ context.Context, _ *ssm.SendCommandInput, _ ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
-	return &ssm.SendCommandOutput{}, nil
+func (m *mockSSMForProvisioner) SendCommand(_ context.Context, input *ssm.SendCommandInput, _ ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
+	m.sentTo = append(m.sentTo, input.InstanceIds...)
+	return &ssm.SendCommandOutput{Command: &ssmtypes.Command{CommandId: aws.String("cmd-mount")}}, nil
 }
 
 func (m *mockSSMForProvisioner) GetCommandInvocation(_ context.Context, _ *ssm.GetCommandInvocationInput, _ ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error) {
@@ -114,27 +115,33 @@ func newMockS3Client() *S3Client {
 	}
 }
 
+// amiFn returns a single Ubuntu image for provisioning tests.
+func amiFn(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
+	return &ec2.DescribeImagesOutput{
+		Images: []types.Image{
+			{ImageId: aws.String("ami-ubuntu-latest"), CreationDate: aws.String("2024-06-01T00:00:00Z")},
+		},
+	}, nil
+}
+
+// listing returns a describeFn that reports the given instances for every call.
+func listing(instances ...types.Instance) func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+	return func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+		reservations := make([]types.Reservation, 0, len(instances))
+		for _, inst := range instances {
+			reservations = append(reservations, types.Reservation{Instances: []types.Instance{inst}})
+		}
+		return &ec2.DescribeInstancesOutput{Reservations: reservations}, nil
+	}
+}
+
 func TestProvision_NewInstance(t *testing.T) {
+	var runInput *ec2.RunInstancesInput
 	ec2Mock := &mockEC2API{
-		// FindInstanceByDeveloper returns no results.
-		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-			return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{}}, nil
-		},
-		describeImgFn: func(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
-			return &ec2.DescribeImagesOutput{
-				Images: []types.Image{
-					{ImageId: aws.String("ami-ubuntu-latest"), CreationDate: aws.String("2024-06-01T00:00:00Z")},
-				},
-			}, nil
-		},
+		describeFn:    listing(),
+		describeImgFn: amiFn,
 		runFn: func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
-			// Verify key params are passed through.
-			if aws.ToString(params.ImageId) != "ami-ubuntu-latest" {
-				t.Errorf("AMI = %q, want ami-ubuntu-latest", aws.ToString(params.ImageId))
-			}
-			if aws.ToString(params.SubnetId) != "subnet-abc123" {
-				t.Errorf("SubnetID = %q, want subnet-abc123", aws.ToString(params.SubnetId))
-			}
+			runInput = params
 			return &ec2.RunInstancesOutput{
 				Instances: []types.Instance{
 					{InstanceId: aws.String("i-new456")},
@@ -149,11 +156,13 @@ func TestProvision_NewInstance(t *testing.T) {
 	provisioner := NewProvisioner(ec2Client, ssmClient, s3Client)
 
 	result, err := provisioner.Provision(context.Background(), ProvisionParams{
-		DeveloperName: "john-dev",
-		InstanceType:  "m7i.xlarge",
-		SSHPublicKey:  "ssh-ed25519 AAAA... test@host",
-		UserData:      []byte("#!/bin/bash\necho hello"),
-			})
+		DeveloperName:    "john-dev",
+		EnvironmentName:  "build",
+		InstanceType:     "m7i.xlarge",
+		RootVolumeSizeGB: 300,
+		SSHPublicKey:     "ssh-ed25519 AAAA... test@host",
+		UserData:         []byte("#!/bin/bash\necho hello"),
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,57 +172,94 @@ func TestProvision_NewInstance(t *testing.T) {
 	if result.Recovered {
 		t.Error("expected Recovered=false for new instance")
 	}
+	if aws.ToString(runInput.ImageId) != "ami-ubuntu-latest" {
+		t.Errorf("AMI = %q, want ami-ubuntu-latest", aws.ToString(runInput.ImageId))
+	}
+	if aws.ToString(runInput.SubnetId) != "subnet-abc123" {
+		t.Errorf("SubnetID = %q, want subnet-abc123", aws.ToString(runInput.SubnetId))
+	}
+	if size := aws.ToInt32(runInput.BlockDeviceMappings[0].Ebs.VolumeSize); size != 300 {
+		t.Errorf("VolumeSize = %d, want 300", size)
+	}
+	if got := tagMap(runInput.TagSpecifications[0].Tags)["CloudDesktopEnv"]; got != "build" {
+		t.Errorf("CloudDesktopEnv tag = %q, want build", got)
+	}
+	if !s3Client.client.(*mockS3ForProvisioner).buckets["clouddesktop-john-dev"] {
+		t.Error("expected the developer bucket to be created")
+	}
 }
 
-func TestProvision_RecoveredInstance(t *testing.T) {
-	now := time.Now()
+func TestProvision_RecoversMatchingEnvironment(t *testing.T) {
 	ec2Mock := &mockEC2API{
-		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-			return &ec2.DescribeInstancesOutput{
-				Reservations: []types.Reservation{
-					{
-						Instances: []types.Instance{
-							{
-								InstanceId:       aws.String("i-existing789"),
-								State:            &types.InstanceState{Name: types.InstanceStateNameStopped},
-								InstanceType:     types.InstanceTypeM7iXlarge,
-								PrivateIpAddress: aws.String("10.0.1.50"),
-								LaunchTime:       &now,
-							},
-						},
-					},
-				},
-			}, nil
-		},
+		describeFn: listing(envInstance("i-main", "main", "running"), envInstance("i-build", "build", "stopped")),
 	}
 
-	ec2Client := newEC2ClientWithAPI(ec2Mock)
-	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
+	provisioner := NewProvisioner(newEC2ClientWithAPI(ec2Mock), newSSMClientWithAPI(defaultSSMMock()), nil)
 
 	result, err := provisioner.Provision(context.Background(), ProvisionParams{
-		DeveloperName: "john-dev",
-		InstanceType:  "m7i.xlarge",
-		SSHPublicKey:  "ssh-ed25519 AAAA... test@host",
-		UserData:      []byte("#!/bin/bash\necho hello"),
+		DeveloperName:   "john-dev",
+		EnvironmentName: "build",
+		InstanceType:    "m7i.xlarge",
+		SSHPublicKey:    "ssh-ed25519 AAAA... test@host",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.InstanceID != "i-existing789" {
-		t.Errorf("InstanceID = %q, want i-existing789", result.InstanceID)
+	if result.InstanceID != "i-build" || !result.Recovered {
+		t.Errorf("got %+v, want recovered i-build", result)
 	}
-	if !result.Recovered {
-		t.Error("expected Recovered=true for existing instance")
+}
+
+func TestProvision_IgnoresOtherEnvironments(t *testing.T) {
+	launched := false
+	ec2Mock := &mockEC2API{
+		describeFn:    listing(envInstance("i-main", "main", "running")),
+		describeImgFn: amiFn,
+		runFn: func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
+			launched = true
+			return &ec2.RunInstancesOutput{Instances: []types.Instance{{InstanceId: aws.String("i-build")}}}, nil
+		},
+	}
+
+	provisioner := NewProvisioner(newEC2ClientWithAPI(ec2Mock), newSSMClientWithAPI(defaultSSMMock()), newMockS3Client())
+
+	result, err := provisioner.Provision(context.Background(), ProvisionParams{
+		DeveloperName:   "john-dev",
+		EnvironmentName: "build",
+		InstanceType:    "m7i.xlarge",
+		SSHPublicKey:    "ssh-ed25519 AAAA... test@host",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !launched || result.Recovered || result.InstanceID != "i-build" {
+		t.Errorf("expected a new launch for build, got %+v (launched=%v)", result, launched)
+	}
+}
+
+func TestProvision_RecoversLegacyInstanceAsMain(t *testing.T) {
+	ec2Mock := &mockEC2API{
+		describeFn: listing(envInstance("i-legacy", "", "stopped")),
+	}
+
+	provisioner := NewProvisioner(newEC2ClientWithAPI(ec2Mock), newSSMClientWithAPI(defaultSSMMock()), nil)
+
+	result, err := provisioner.Provision(context.Background(), ProvisionParams{
+		DeveloperName:   "john-dev",
+		EnvironmentName: "main",
+		InstanceType:    "m7i.xlarge",
+		SSHPublicKey:    "ssh-ed25519 AAAA... test@host",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.InstanceID != "i-legacy" || !result.Recovered {
+		t.Errorf("got %+v, want recovered i-legacy", result)
 	}
 }
 
 func TestProvision_SSMError(t *testing.T) {
-	ec2Mock := &mockEC2API{
-		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-			return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{}}, nil
-		},
-	}
+	ec2Mock := &mockEC2API{describeFn: listing()}
 
 	ssmMock := &mockSSMForProvisioner{err: errors.New("AccessDeniedException")}
 
@@ -222,9 +268,10 @@ func TestProvision_SSMError(t *testing.T) {
 	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
 
 	_, err := provisioner.Provision(context.Background(), ProvisionParams{
-		DeveloperName: "john-dev",
-		InstanceType:  "m7i.xlarge",
-		SSHPublicKey:  "ssh-ed25519 AAAA... test@host",
+		DeveloperName:   "john-dev",
+		EnvironmentName: "main",
+		InstanceType:    "m7i.xlarge",
+		SSHPublicKey:    "ssh-ed25519 AAAA... test@host",
 	})
 	if err == nil {
 		t.Fatal("expected error for SSM failure")
@@ -234,80 +281,95 @@ func TestProvision_SSMError(t *testing.T) {
 	}
 }
 
-func TestProvision_RunInstanceFailure_CleansUpKeyPair(t *testing.T) {
-	deleteKeyCalled := false
+func TestProvision_RunInstanceFailure_KeepsSharedKeyPair(t *testing.T) {
+	deleteKeyCalls := 0
 	ec2Mock := &mockEC2API{
-		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-			return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{}}, nil
-		},
-		describeImgFn: func(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
-			return &ec2.DescribeImagesOutput{
-				Images: []types.Image{
-					{ImageId: aws.String("ami-test"), CreationDate: aws.String("2024-06-01T00:00:00Z")},
-				},
-			}, nil
-		},
+		describeFn:    listing(),
+		describeImgFn: amiFn,
 		runFn: func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
-			return nil, errors.New("InsufficientInstanceCapacity")
+			return nil, errors.New("InvalidParameterValue")
 		},
 		deleteKeyFn: func(ctx context.Context, params *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error) {
-			if aws.ToString(params.KeyName) == "clouddesktop-john-dev" {
-				deleteKeyCalled = true
-			}
+			deleteKeyCalls++
 			return &ec2.DeleteKeyPairOutput{}, nil
 		},
 	}
 
-	ec2Client := newEC2ClientWithAPI(ec2Mock)
-	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	s3Client := newMockS3Client()
-	provisioner := NewProvisioner(ec2Client, ssmClient, s3Client)
+	provisioner := NewProvisioner(newEC2ClientWithAPI(ec2Mock), newSSMClientWithAPI(defaultSSMMock()), newMockS3Client())
 
 	_, err := provisioner.Provision(context.Background(), ProvisionParams{
-		DeveloperName: "john-dev",
-		InstanceType:  "m7i.xlarge",
-		SSHPublicKey:  "ssh-ed25519 AAAA... test@host",
-		UserData:      []byte("#!/bin/bash"),
-			})
+		DeveloperName:   "john-dev",
+		EnvironmentName: "build",
+		InstanceType:    "m7i.xlarge",
+		SSHPublicKey:    "ssh-ed25519 AAAA... test@host",
+		UserData:        []byte("#!/bin/bash"),
+	})
 	if err == nil {
 		t.Fatal("expected error for RunInstance failure")
 	}
-	if !deleteKeyCalled {
-		t.Error("expected DeleteKeyPair to be called for cleanup on RunInstance failure")
+	// ImportSSHKeyPair deletes before importing; nothing may delete it after a failed launch.
+	if deleteKeyCalls != 1 {
+		t.Errorf("DeleteKeyPair calls = %d, want 1 (the import's own delete only)", deleteKeyCalls)
 	}
 }
 
-func TestDestroy_Success(t *testing.T) {
-	terminateCalled := false
-	deleteKeyCalled := false
+// destroyMocks returns an EC2 mock that records terminate and key pair deletion,
+// plus an SSM and S3 setup that already holds the developer's bucket.
+func destroyMocks(terminated, deletedKey *bool) (*mockEC2API, *mockSSMForProvisioner, *S3Client) {
 	ec2Mock := &mockEC2API{
 		terminateFn: func(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error) {
-			if params.InstanceIds[0] == "i-123" {
-				terminateCalled = true
-			}
+			*terminated = params.InstanceIds[0] == "i-123"
 			return &ec2.TerminateInstancesOutput{}, nil
 		},
 		deleteKeyFn: func(ctx context.Context, params *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error) {
-			if aws.ToString(params.KeyName) == "clouddesktop-john-dev" {
-				deleteKeyCalled = true
-			}
+			*deletedKey = aws.ToString(params.KeyName) == "clouddesktop-john-dev"
 			return &ec2.DeleteKeyPairOutput{}, nil
 		},
 	}
+	ssmMock := defaultSSMMock()
+	ssmMock.params[S3BucketParamName("john-dev")] = "clouddesktop-john-dev"
+	s3Client := newMockS3Client()
+	s3Client.client.(*mockS3ForProvisioner).buckets["clouddesktop-john-dev"] = true
+	return ec2Mock, ssmMock, s3Client
+}
 
-	ec2Client := newEC2ClientWithAPI(ec2Mock)
-	ssmClient := newSSMClientWithAPI(defaultSSMMock())
-	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
+func TestDestroy_KeepsKeyPairAndBucketWhenOthersRemain(t *testing.T) {
+	var terminated, deletedKey bool
+	ec2Mock, ssmMock, s3Client := destroyMocks(&terminated, &deletedKey)
+	provisioner := NewProvisioner(newEC2ClientWithAPI(ec2Mock), newSSMClientWithAPI(ssmMock), s3Client)
 
-	err := provisioner.Destroy(context.Background(), "i-123", "john-dev")
-	if err != nil {
+	if err := provisioner.Destroy(context.Background(), "i-123", "john-dev", false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !terminateCalled {
+
+	if !terminated {
 		t.Error("expected TerminateInstances to be called")
 	}
-	if !deleteKeyCalled {
-		t.Error("expected DeleteKeyPair to be called")
+	if deletedKey {
+		t.Error("key pair must be kept while other environments remain")
+	}
+	if !s3Client.client.(*mockS3ForProvisioner).buckets["clouddesktop-john-dev"] {
+		t.Error("bucket must never be deleted by destroy")
+	}
+	if _, ok := ssmMock.params[S3BucketParamName("john-dev")]; !ok {
+		t.Error("bucket parameter must never be deleted by destroy")
+	}
+}
+
+func TestDestroy_DeletesKeyPairForLastEnvironment(t *testing.T) {
+	var terminated, deletedKey bool
+	ec2Mock, ssmMock, s3Client := destroyMocks(&terminated, &deletedKey)
+	provisioner := NewProvisioner(newEC2ClientWithAPI(ec2Mock), newSSMClientWithAPI(ssmMock), s3Client)
+
+	if err := provisioner.Destroy(context.Background(), "i-123", "john-dev", true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !terminated || !deletedKey {
+		t.Errorf("terminated=%v deletedKey=%v, want both true", terminated, deletedKey)
+	}
+	if !s3Client.client.(*mockS3ForProvisioner).buckets["clouddesktop-john-dev"] {
+		t.Error("bucket must never be deleted by destroy")
 	}
 }
 
@@ -322,7 +384,7 @@ func TestDestroy_TerminateError(t *testing.T) {
 	ssmClient := newSSMClientWithAPI(defaultSSMMock())
 	provisioner := NewProvisioner(ec2Client, ssmClient, nil)
 
-	err := provisioner.Destroy(context.Background(), "i-123", "john-dev")
+	err := provisioner.Destroy(context.Background(), "i-123", "john-dev", false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -350,5 +412,58 @@ func TestResize_Success(t *testing.T) {
 	}
 	if !modifyCalled {
 		t.Error("expected ModifyInstanceAttribute to be called")
+	}
+}
+
+func TestEnsureS3Mount_CreatesMissingBucketThenMounts(t *testing.T) {
+	ssmMock := defaultSSMMock()
+	s3Client := newMockS3Client()
+	provisioner := NewProvisioner(nil, newSSMClientWithAPI(ssmMock), s3Client)
+
+	if err := provisioner.EnsureS3Mount(context.Background(), "i-build", "john-dev"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !s3Client.client.(*mockS3ForProvisioner).buckets["clouddesktop-john-dev"] {
+		t.Error("expected the bucket to be created")
+	}
+	if ssmMock.params[S3BucketParamName("john-dev")] != "clouddesktop-john-dev" {
+		t.Error("expected the bucket parameter to be stored")
+	}
+	if len(ssmMock.sentTo) != 1 || ssmMock.sentTo[0] != "i-build" {
+		t.Errorf("mount command sent to %v, want [i-build]", ssmMock.sentTo)
+	}
+}
+
+func TestEnsureS3Mount_RecreatesDeletedBucket(t *testing.T) {
+	ssmMock := defaultSSMMock()
+	ssmMock.params[S3BucketParamName("john-dev")] = "clouddesktop-john-dev"
+	s3Client := newMockS3Client() // the parameter exists but the bucket does not
+	provisioner := NewProvisioner(nil, newSSMClientWithAPI(ssmMock), s3Client)
+
+	if err := provisioner.EnsureS3Mount(context.Background(), "i-main", "john-dev"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !s3Client.client.(*mockS3ForProvisioner).buckets["clouddesktop-john-dev"] {
+		t.Error("expected the deleted bucket to be recreated")
+	}
+}
+
+// Regression test for the bug where a freshly provisioned instance was never
+// mounted because the bucket and its parameter already existed.
+func TestEnsureS3Mount_MountsEvenWhenBucketExists(t *testing.T) {
+	ssmMock := defaultSSMMock()
+	ssmMock.params[S3BucketParamName("john-dev")] = "clouddesktop-john-dev"
+	s3Client := newMockS3Client()
+	s3Client.client.(*mockS3ForProvisioner).buckets["clouddesktop-john-dev"] = true
+	provisioner := NewProvisioner(nil, newSSMClientWithAPI(ssmMock), s3Client)
+
+	if err := provisioner.EnsureS3Mount(context.Background(), "i-new", "john-dev"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(ssmMock.sentTo) != 1 || ssmMock.sentTo[0] != "i-new" {
+		t.Errorf("mount command sent to %v, want [i-new]", ssmMock.sentTo)
 	}
 }

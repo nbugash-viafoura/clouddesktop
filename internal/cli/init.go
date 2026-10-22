@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/huh"
+	vfaws "github.com/nbugash-viafoura/clouddesktop/internal/aws"
 	"github.com/nbugash-viafoura/clouddesktop/internal/config"
+	"github.com/nbugash-viafoura/clouddesktop/internal/environment"
 	"github.com/spf13/cobra"
 )
 
@@ -30,8 +34,15 @@ func runInit() error {
 	if err != nil && !errors.Is(err, config.ErrConfigNotFound) {
 		return fmt.Errorf("failed to check existing configuration: %w", err)
 	}
-	if existing != nil && existing.InstanceID != "" {
-		return fmt.Errorf("clouddesktop is already initialized and an instance exists (ID: %s)\nRun 'clouddesktop destroy --confirm' before re-initializing", existing.InstanceID)
+	if existing != nil {
+		envs, err := listEnvironments(existing.AWSProfile, existing.Region, existing.DeveloperName)
+		if err != nil {
+			return fmt.Errorf("failed to check for existing environments: %w", err)
+		}
+		if len(envs) > 0 {
+			return fmt.Errorf("clouddesktop is already initialized and you have environments: %s\nDestroy them first if you need to change your developer name or SSH key",
+				strings.Join(environment.Names(envs), ", "))
+		}
 	}
 
 	cfg := &config.Config{}
@@ -87,7 +98,19 @@ func runInit() error {
 
 	cfg.AWSProfile = awsProfile
 
-	// Instance type (select), defaulting to m7i.xlarge.
+	// Discover environments this developer already owns (for example on a new
+	// laptop) so access to them can be restored without re-creating anything.
+	envs, err := listEnvironments(cfg.AWSProfile, cfg.Region, cfg.DeveloperName)
+	if err != nil {
+		fmt.Printf("Warning: could not look up existing environments: %s\n", err)
+		envs = nil
+	}
+	if len(envs) > 0 {
+		fmt.Printf("Found %d environment(s): %s\n", len(envs), strings.Join(environment.Names(envs), ", "))
+		fmt.Println("Select the SSH key these environments were created with.")
+	}
+
+	// Default instance type for new environments (select), defaulting to m7i.xlarge.
 	instanceType := "m7i.xlarge"
 	instanceTypeOptions := make([]huh.Option[string], len(config.ValidInstanceTypes))
 	for i, it := range config.ValidInstanceTypes {
@@ -97,7 +120,7 @@ func runInit() error {
 	selectForm := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Instance type").
+				Title("Default instance type for new environments").
 				Options(instanceTypeOptions...).
 				Value(&instanceType),
 		),
@@ -150,8 +173,21 @@ func runInit() error {
 
 	cfg.SSHKeyPath = strings.TrimSuffix(keyPath, ".pub")
 
+	defaultEnv, err := chooseDefaultEnvironment(envs)
+	if err != nil {
+		return err
+	}
+	cfg.DefaultEnvironment = defaultEnv
+
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	if len(envs) > 0 {
+		if err := vfaws.SyncSSHConfig(envs, sshSettings(cfg)); err != nil {
+			fmt.Printf("Warning: failed to update SSH config: %s\n", err)
+			fmt.Println("  Run 'clouddesktop up <name>' to retry.")
+		}
 	}
 
 	fmt.Println()
@@ -161,9 +197,59 @@ func runInit() error {
 	fmt.Println("per company policy.")
 	fmt.Println()
 	fmt.Printf("Configuration saved to %s\n", config.ConfigPath())
-	fmt.Println("Run 'clouddesktop up' to provision your cloud desktop.")
+	if len(envs) > 0 {
+		fmt.Println("Run 'clouddesktop list' to see your environments.")
+	} else {
+		fmt.Println("Run 'clouddesktop up' to provision your cloud desktop.")
+	}
 
 	return nil
+}
+
+// chooseDefaultEnvironment picks the default after discovery: the only
+// environment when there is one, the developer's choice when there are several.
+func chooseDefaultEnvironment(envs []environment.Environment) (string, error) {
+	switch len(envs) {
+	case 0:
+		return "", nil
+	case 1:
+		return envs[0].Name, nil
+	}
+
+	names := environment.Names(envs)
+	options := make([]huh.Option[string], len(names))
+	for i, name := range names {
+		options[i] = huh.NewOption(name, name)
+	}
+
+	choice := names[0]
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Default environment").
+				Options(options...).
+				Value(&choice),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return "", fmt.Errorf("init cancelled: %w", err)
+	}
+	return choice, nil
+}
+
+// listEnvironments returns the developer's environments using the given AWS profile.
+func listEnvironments(profile, region, developerName string) ([]environment.Environment, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := vfaws.ValidateSession(ctx, profile, region); err != nil {
+		return nil, err
+	}
+	ec2Client, err := vfaws.NewEC2Client(ctx, profile, region)
+	if err != nil {
+		return nil, err
+	}
+	return ec2Client.ListEnvironments(ctx, developerName)
 }
 
 // findAWSProfiles runs 'aws configure list-profiles' and returns the available profile names.

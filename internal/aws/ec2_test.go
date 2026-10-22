@@ -15,18 +15,19 @@ import (
 
 // mockEC2API implements ec2api for testing.
 type mockEC2API struct {
-	startFn            func(ctx context.Context, params *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error)
-	stopFn             func(ctx context.Context, params *ec2.StopInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error)
-	describeFn         func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
-	runFn              func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
-	terminateFn        func(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
-	importKeyFn        func(ctx context.Context, params *ec2.ImportKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.ImportKeyPairOutput, error)
-	deleteKeyFn        func(ctx context.Context, params *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error)
-	describeImgFn      func(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
-	modifyAttrFn       func(ctx context.Context, params *ec2.ModifyInstanceAttributeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyInstanceAttributeOutput, error)
-	describeVolumesFn  func(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
-	modifyVolumeFn     func(ctx context.Context, params *ec2.ModifyVolumeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVolumeOutput, error)
+	startFn              func(ctx context.Context, params *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error)
+	stopFn               func(ctx context.Context, params *ec2.StopInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error)
+	describeFn           func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+	runFn                func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
+	terminateFn          func(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+	importKeyFn          func(ctx context.Context, params *ec2.ImportKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.ImportKeyPairOutput, error)
+	deleteKeyFn          func(ctx context.Context, params *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error)
+	describeImgFn        func(ctx context.Context, params *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
+	modifyAttrFn         func(ctx context.Context, params *ec2.ModifyInstanceAttributeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyInstanceAttributeOutput, error)
+	describeVolumesFn    func(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
+	modifyVolumeFn       func(ctx context.Context, params *ec2.ModifyVolumeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVolumeOutput, error)
 	describeVolumeModsFn func(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error)
+	createTagsFn         func(ctx context.Context, params *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error)
 }
 
 func (m *mockEC2API) StartInstances(ctx context.Context, params *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error) {
@@ -111,6 +112,13 @@ func (m *mockEC2API) DescribeVolumesModifications(ctx context.Context, params *e
 		return m.describeVolumeModsFn(ctx, params, optFns...)
 	}
 	return &ec2.DescribeVolumesModificationsOutput{}, nil
+}
+
+func (m *mockEC2API) CreateTags(ctx context.Context, params *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {
+	if m.createTagsFn != nil {
+		return m.createTagsFn(ctx, params, optFns...)
+	}
+	return &ec2.CreateTagsOutput{}, nil
 }
 
 // fastClient creates an EC2Client with minimal polling intervals for fast tests.
@@ -460,75 +468,6 @@ func TestPollConstants(t *testing.T) {
 }
 
 // --- Tests for new provisioning methods ---
-
-func TestFindInstanceByDeveloper_Found(t *testing.T) {
-	now := time.Now()
-	mock := &mockEC2API{
-		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-			return &ec2.DescribeInstancesOutput{
-				Reservations: []types.Reservation{
-					{
-						Instances: []types.Instance{
-							{
-								InstanceId:       aws.String("i-existing"),
-								State:            &types.InstanceState{Name: types.InstanceStateNameRunning},
-								InstanceType:     types.InstanceTypeM7iXlarge,
-								PrivateIpAddress: aws.String("10.0.1.50"),
-								LaunchTime:       &now,
-							},
-						},
-					},
-				},
-			}, nil
-		},
-	}
-	client := newEC2ClientWithAPI(mock)
-
-	info, err := client.FindInstanceByDeveloper(context.Background(), "john-dev")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if info == nil {
-		t.Fatal("expected to find instance, got nil")
-	}
-	if info.InstanceID != "i-existing" {
-		t.Errorf("InstanceID = %q, want i-existing", info.InstanceID)
-	}
-	if info.State != "running" {
-		t.Errorf("State = %q, want running", info.State)
-	}
-}
-
-func TestFindInstanceByDeveloper_NotFound(t *testing.T) {
-	mock := &mockEC2API{
-		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-			return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{}}, nil
-		},
-	}
-	client := newEC2ClientWithAPI(mock)
-
-	info, err := client.FindInstanceByDeveloper(context.Background(), "john-dev")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if info != nil {
-		t.Errorf("expected nil, got %+v", info)
-	}
-}
-
-func TestFindInstanceByDeveloper_APIError(t *testing.T) {
-	mock := &mockEC2API{
-		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-			return nil, errors.New("access denied")
-		},
-	}
-	client := newEC2ClientWithAPI(mock)
-
-	_, err := client.FindInstanceByDeveloper(context.Background(), "john-dev")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
 
 func TestTerminateInstance_Success(t *testing.T) {
 	mock := &mockEC2API{}
@@ -955,3 +894,426 @@ func TestWaitUntilVolumeResized_TransientErrorRetried(t *testing.T) {
 	}
 }
 
+// --- Tests for environment listing and tagging ---
+
+// envInstance builds an instance tagged with the given environment name.
+// An empty envName leaves the CloudDesktopEnv tag off, like a legacy instance.
+func envInstance(instanceID, envName, state string) types.Instance {
+	tags := []types.Tag{
+		{Key: aws.String("Developer"), Value: aws.String("john-dev")},
+		{Key: aws.String("Project"), Value: aws.String("clouddesktop")},
+	}
+	if envName != "" {
+		tags = append(tags, types.Tag{Key: aws.String("CloudDesktopEnv"), Value: aws.String(envName)})
+	}
+	now := time.Now()
+	return types.Instance{
+		InstanceId:       aws.String(instanceID),
+		State:            &types.InstanceState{Name: types.InstanceStateName(state)},
+		InstanceType:     types.InstanceTypeM7iXlarge,
+		PrivateIpAddress: aws.String("10.0.1.5"),
+		LaunchTime:       &now,
+		Tags:             tags,
+		RootDeviceName:   aws.String("/dev/sda1"),
+		BlockDeviceMappings: []types.InstanceBlockDeviceMapping{
+			{DeviceName: aws.String("/dev/sdf"), Ebs: &types.EbsInstanceBlockDevice{VolumeId: aws.String("vol-data-" + instanceID)}},
+			{DeviceName: aws.String("/dev/sda1"), Ebs: &types.EbsInstanceBlockDevice{VolumeId: aws.String("vol-root-" + instanceID)}},
+		},
+	}
+}
+
+func filterValues(filters []types.Filter, name string) []string {
+	for _, f := range filters {
+		if aws.ToString(f.Name) == name {
+			return f.Values
+		}
+	}
+	return nil
+}
+
+func TestListEnvironments_FiltersAndMapping(t *testing.T) {
+	var gotFilters []types.Filter
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			gotFilters = params.Filters
+			return &ec2.DescribeInstancesOutput{
+				Reservations: []types.Reservation{
+					{Instances: []types.Instance{envInstance("i-service", "service", "stopped")}},
+					{Instances: []types.Instance{envInstance("i-build", "build", "running")}},
+				},
+			}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	envs, err := client.ListEnvironments(context.Background(), "john-dev")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := filterValues(gotFilters, "tag:Developer"); len(got) != 1 || got[0] != "john-dev" {
+		t.Errorf("tag:Developer filter = %v, want [john-dev]", got)
+	}
+	if got := filterValues(gotFilters, "tag:Project"); len(got) != 1 || got[0] != "clouddesktop" {
+		t.Errorf("tag:Project filter = %v, want [clouddesktop]", got)
+	}
+	wantStates := []string{"pending", "running", "stopping", "stopped"}
+	if got := filterValues(gotFilters, "instance-state-name"); strings.Join(got, ",") != strings.Join(wantStates, ",") {
+		t.Errorf("instance-state-name filter = %v, want %v", got, wantStates)
+	}
+
+	if len(envs) != 2 {
+		t.Fatalf("got %d environments, want 2", len(envs))
+	}
+	if envs[0].Name != "build" || envs[1].Name != "service" {
+		t.Errorf("environments not sorted by name: %q, %q", envs[0].Name, envs[1].Name)
+	}
+	build := envs[0]
+	if build.InstanceID != "i-build" || build.State != "running" || build.InstanceType != "m7i.xlarge" {
+		t.Errorf("unexpected mapping: %+v", build)
+	}
+	if build.RootVolumeID != "vol-root-i-build" {
+		t.Errorf("RootVolumeID = %q, want vol-root-i-build", build.RootVolumeID)
+	}
+	if build.PrivateIP != "10.0.1.5" || build.LaunchTime == nil {
+		t.Errorf("PrivateIP/LaunchTime not mapped: %+v", build)
+	}
+	if build.Legacy {
+		t.Error("tagged instance should not be marked legacy")
+	}
+}
+
+func TestListEnvironments_LegacyInstanceIsMain(t *testing.T) {
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			return &ec2.DescribeInstancesOutput{
+				Reservations: []types.Reservation{{Instances: []types.Instance{envInstance("i-legacy", "", "running")}}},
+			}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	envs, err := client.ListEnvironments(context.Background(), "john-dev")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(envs) != 1 || envs[0].Name != "main" || !envs[0].Legacy {
+		t.Errorf("got %+v, want one legacy environment named main", envs)
+	}
+}
+
+func TestListEnvironments_FollowsPages(t *testing.T) {
+	calls := 0
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			calls++
+			if params.NextToken == nil {
+				return &ec2.DescribeInstancesOutput{
+					Reservations: []types.Reservation{{Instances: []types.Instance{envInstance("i-a", "alpha", "running")}}},
+					NextToken:    aws.String("page-2"),
+				}, nil
+			}
+			return &ec2.DescribeInstancesOutput{
+				Reservations: []types.Reservation{{Instances: []types.Instance{envInstance("i-b", "beta", "stopped")}}},
+			}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	envs, err := client.ListEnvironments(context.Background(), "john-dev")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("DescribeInstances calls = %d, want 2", calls)
+	}
+	if len(envs) != 2 {
+		t.Errorf("got %d environments, want 2", len(envs))
+	}
+}
+
+func TestListEnvironments_DuplicateNameIsAnError(t *testing.T) {
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			return &ec2.DescribeInstancesOutput{
+				Reservations: []types.Reservation{
+					{Instances: []types.Instance{envInstance("i-one", "build", "running")}},
+					{Instances: []types.Instance{envInstance("i-two", "build", "stopped")}},
+				},
+			}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	_, err := client.ListEnvironments(context.Background(), "john-dev")
+	if err == nil {
+		t.Fatal("expected an error for two instances with the same environment name")
+	}
+	for _, want := range []string{`"build"`, "i-one", "i-two"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want to contain %s", err, want)
+		}
+	}
+}
+
+func TestListEnvironments_APIError(t *testing.T) {
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			return nil, errors.New("access denied")
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	if _, err := client.ListEnvironments(context.Background(), "john-dev"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestTagEnvironment(t *testing.T) {
+	var got *ec2.CreateTagsInput
+	mock := &mockEC2API{
+		createTagsFn: func(ctx context.Context, params *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {
+			got = params
+			return &ec2.CreateTagsOutput{}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	if err := client.TagEnvironment(context.Background(), "i-legacy", "vol-root", "main"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Join(got.Resources, ",") != "i-legacy,vol-root" {
+		t.Errorf("Resources = %v, want [i-legacy vol-root]", got.Resources)
+	}
+	if len(got.Tags) != 1 || aws.ToString(got.Tags[0].Key) != "CloudDesktopEnv" || aws.ToString(got.Tags[0].Value) != "main" {
+		t.Errorf("Tags = %+v, want CloudDesktopEnv=main", got.Tags)
+	}
+}
+
+func tagMap(tags []types.Tag) map[string]string {
+	m := make(map[string]string, len(tags))
+	for _, tag := range tags {
+		m[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	return m
+}
+
+func TestRunInstance_EnvironmentTagsAndVolumeSize(t *testing.T) {
+	var got *ec2.RunInstancesInput
+	mock := &mockEC2API{
+		runFn: func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
+			got = params
+			return &ec2.RunInstancesOutput{Instances: []types.Instance{{InstanceId: aws.String("i-new")}}}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	_, err := client.RunInstance(context.Background(), RunInstanceParams{
+		AMIID:            "ami-123",
+		InstanceType:     "m7i.large",
+		DeveloperName:    "john-dev",
+		EnvironmentName:  "build",
+		RootVolumeSizeGB: 300,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var instanceTags, volumeTags map[string]string
+	for _, spec := range got.TagSpecifications {
+		switch spec.ResourceType {
+		case types.ResourceTypeInstance:
+			instanceTags = tagMap(spec.Tags)
+		case types.ResourceTypeVolume:
+			volumeTags = tagMap(spec.Tags)
+		}
+	}
+	if instanceTags["Name"] != "clouddesktop-john-dev-build" || instanceTags["CloudDesktopEnv"] != "build" {
+		t.Errorf("instance tags = %v", instanceTags)
+	}
+	if volumeTags["Name"] != "clouddesktop-john-dev-build-root" || volumeTags["CloudDesktopEnv"] != "build" {
+		t.Errorf("volume tags = %v", volumeTags)
+	}
+	if size := aws.ToInt32(got.BlockDeviceMappings[0].Ebs.VolumeSize); size != 300 {
+		t.Errorf("VolumeSize = %d, want 300", size)
+	}
+}
+
+func TestRunInstance_DefaultVolumeSize(t *testing.T) {
+	var got *ec2.RunInstancesInput
+	mock := &mockEC2API{
+		runFn: func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
+			got = params
+			return &ec2.RunInstancesOutput{Instances: []types.Instance{{InstanceId: aws.String("i-new")}}}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	if _, err := client.RunInstance(context.Background(), RunInstanceParams{DeveloperName: "john-dev", EnvironmentName: "main"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if size := aws.ToInt32(got.BlockDeviceMappings[0].Ebs.VolumeSize); size != 100 {
+		t.Errorf("VolumeSize = %d, want default 100", size)
+	}
+}
+
+func TestImportSSHKeyPair_DuplicateIsSuccess(t *testing.T) {
+	mock := &mockEC2API{
+		importKeyFn: func(ctx context.Context, params *ec2.ImportKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.ImportKeyPairOutput, error) {
+			return nil, errors.New("api error InvalidKeyPair.Duplicate: The keypair already exists")
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	if err := client.ImportSSHKeyPair(context.Background(), "clouddesktop-john", "ssh-ed25519 AAAA..."); err != nil {
+		t.Errorf("unexpected error for duplicate key pair: %v", err)
+	}
+}
+
+func TestCapacityErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		apiError string
+		want     []string
+	}{
+		{
+			name:     "vCPU quota",
+			apiError: "api error VcpuLimitExceeded: You have requested more vCPU capacity than your current vCPU limit",
+			want:     []string{"on-demand instance limit has been reached", "Stop environments you aren't using"},
+		},
+		{
+			name:     "instance quota",
+			apiError: "api error InstanceLimitExceeded: Your quota allows for 0 more running instance(s)",
+			want:     []string{"on-demand instance limit has been reached", "ask the platform team"},
+		},
+		{
+			name:     "no AWS capacity",
+			apiError: "api error InsufficientInstanceCapacity: We currently do not have sufficient capacity",
+			want:     []string{"AWS has no spare capacity for m7i.4xlarge right now", "choose another instance type"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run("RunInstance "+tt.name, func(t *testing.T) {
+			mock := &mockEC2API{
+				runFn: func(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
+					return nil, errors.New(tt.apiError)
+				},
+			}
+			client := newEC2ClientWithAPI(mock)
+
+			_, err := client.RunInstance(context.Background(), RunInstanceParams{InstanceType: "m7i.4xlarge", DeveloperName: "john-dev", EnvironmentName: "build"})
+
+			var awsErr *AWSError
+			if !errors.As(err, &awsErr) || awsErr.Type != ErrorTypeCapacity {
+				t.Fatalf("error = %v, want *AWSError with ErrorTypeCapacity", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want to contain %q", err, want)
+				}
+			}
+		})
+	}
+
+	t.Run("StartInstance quota", func(t *testing.T) {
+		mock := &mockEC2API{
+			startFn: func(ctx context.Context, params *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error) {
+				return nil, errors.New("api error VcpuLimitExceeded: limit")
+			},
+		}
+		client := newEC2ClientWithAPI(mock)
+
+		err := client.StartInstance(context.Background(), "i-123")
+
+		var awsErr *AWSError
+		if !errors.As(err, &awsErr) || awsErr.Type != ErrorTypeCapacity {
+			t.Fatalf("error = %v, want *AWSError with ErrorTypeCapacity", err)
+		}
+	})
+}
+
+func TestRootVolumeSizes(t *testing.T) {
+	calls := 0
+	mock := &mockEC2API{
+		describeVolumesFn: func(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
+			calls++
+			if strings.Join(params.VolumeIds, ",") != "vol-a,vol-b" {
+				t.Errorf("VolumeIds = %v, want [vol-a vol-b]", params.VolumeIds)
+			}
+			return &ec2.DescribeVolumesOutput{Volumes: []types.Volume{
+				{VolumeId: aws.String("vol-a"), Size: aws.Int32(100)},
+				{VolumeId: aws.String("vol-b"), Size: aws.Int32(300)},
+			}}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	sizes, err := client.RootVolumeSizes(context.Background(), []string{"vol-a", "vol-b"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 || sizes["vol-a"] != 100 || sizes["vol-b"] != 300 {
+		t.Errorf("calls=%d sizes=%v, want 1 call with vol-a=100 vol-b=300", calls, sizes)
+	}
+}
+
+func TestRootVolumeSizes_EmptyInputMakesNoCall(t *testing.T) {
+	mock := &mockEC2API{
+		describeVolumesFn: func(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
+			t.Error("DescribeVolumes should not be called for no volumes")
+			return &ec2.DescribeVolumesOutput{}, nil
+		},
+	}
+
+	sizes, err := newEC2ClientWithAPI(mock).RootVolumeSizes(context.Background(), nil)
+	if err != nil || len(sizes) != 0 {
+		t.Errorf("got (%v, %v), want an empty map and no error", sizes, err)
+	}
+}
+
+// SC-004: listing cost depends on result pages, not on the number of environments.
+func TestListingTenEnvironments_UsesConstantCalls(t *testing.T) {
+	describeCalls, volumeCalls := 0, 0
+	mock := &mockEC2API{
+		describeFn: func(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+			describeCalls++
+			first := 0
+			var next *string
+			if params.NextToken == nil {
+				next = aws.String("page-2")
+			} else {
+				first = 5
+			}
+			var reservations []types.Reservation
+			for i := first; i < first+5; i++ {
+				reservations = append(reservations, types.Reservation{Instances: []types.Instance{
+					envInstance(fmt.Sprintf("i-%d", i), fmt.Sprintf("env%d", i), "running"),
+				}})
+			}
+			return &ec2.DescribeInstancesOutput{Reservations: reservations, NextToken: next}, nil
+		},
+		describeVolumesFn: func(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
+			volumeCalls++
+			return &ec2.DescribeVolumesOutput{}, nil
+		},
+	}
+	client := newEC2ClientWithAPI(mock)
+
+	envs, err := client.ListEnvironments(context.Background(), "john-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	volumeIDs := make([]string, 0, len(envs))
+	for _, env := range envs {
+		volumeIDs = append(volumeIDs, env.RootVolumeID)
+	}
+	if _, err := client.RootVolumeSizes(context.Background(), volumeIDs); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(envs) != 10 || describeCalls != 2 || volumeCalls != 1 {
+		t.Errorf("envs=%d DescribeInstances=%d DescribeVolumes=%d, want 10, 2 and 1", len(envs), describeCalls, volumeCalls)
+	}
+}
