@@ -21,6 +21,7 @@ A self-service CLI tool for provisioning and managing personal cloud development
   - [First-Time Setup](#first-time-setup)
   - [Provision and Start](#provision-and-start)
   - [Multiple Environments](#multiple-environments)
+  - [Upgrading from a Single-Environment Release](#upgrading-from-a-single-environment-release)
   - [Connect](#connect)
   - [Check Status](#check-status)
   - [Stop](#stop)
@@ -258,9 +259,31 @@ clouddesktop ssh build     # every environment command takes an optional name
 - `create` doesn't mount the S3 bucket while bootstrap is still running. Run `clouddesktop up <name>` once bootstrap finishes (~10 minutes).
 - The list of environments comes from EC2 tags (`CloudDesktopEnv`), not from local files, so a new laptop only needs `clouddesktop init`.
 
-**Upgrading from a single-environment release:** the first command you run migrates `~/.clouddesktop/config.yaml`. Your existing instance becomes the environment `main` and your default, and `ssh clouddesktop` keeps working. The original file is kept as `~/.clouddesktop/config.yaml.v1-backup`. Nothing on the instance changes. To go back to an older release, restore that backup.
-
 **For AWS admins:** activate `Developer` and `CloudDesktopEnv` as cost allocation tags in the Billing console to see costs per developer and environment.
+
+### Upgrading from a Single-Environment Release
+
+Nothing needs to be re-provisioned. The first command you run with the new release migrates `~/.clouddesktop/config.yaml`:
+
+- Your existing instance becomes the environment `main` and your default, so commands you run without a name keep acting on it.
+- `ssh clouddesktop` and IDE hosts saved as `clouddesktop` keep reaching the same machine.
+- The original config is kept as `~/.clouddesktop/config.yaml.v1-backup`.
+- The instance itself isn't changed. It only gets a `CloudDesktopEnv=main` tag, which is skipped if your AWS permissions don't allow tagging.
+
+What behaves differently after the upgrade:
+
+| Area | Before | Now |
+|---|---|---|
+| `destroy` | Deleted the instance, the S3 bucket and its contents, the key pair, and `config.yaml` | Deletes only the named environment and its disk. The S3 bucket is kept until you run `s3-reset --confirm`, the key pair goes with your last environment, and `config.yaml` is kept, so you don't need `init` afterwards |
+| `destroy` and `s3-reset` without `--confirm` | One-line error | Shows what would be deleted, changes nothing, and still exits non-zero |
+| `init` when a config exists | Worked offline; refused only if an instance ID was stored | Needs a valid AWS session to check for environments, and refuses while you have any |
+| `ssh` | Connected straight away | Looks up the environment in AWS first, which adds a second or two |
+| `up` | Set up the S3 mount only when the bucket or its parameter was missing, so freshly provisioned instances were never mounted | Checks the mount on every run and repairs it. Right after starting a stopped instance, this can wait up to 3 minutes for SSM to reconnect |
+| Command output | Instance details only | Commands print `Environment: <name> (<instance-id>)` before acting, and `status` also shows the environment and whether it's your default. Update any scripts that parse the output |
+| Instance `Name` tag | `clouddesktop-<you>` | New environments are named `clouddesktop-<you>-<env>`. Your migrated instance keeps its old name |
+| `instance_type` in config | The current instance's type, updated by `resize-instance` | The default type for new environments. `resize-instance` no longer changes it |
+
+**Use the new release on every machine you run `clouddesktop` from.** Once you have more than one environment, an older release can't tell them apart: it picks whichever instance AWS returns first, and its `destroy` deletes the shared S3 bucket and key pair along with that instance. To go back to an older release while you still have a single environment, copy `config.yaml.v1-backup` over `config.yaml`.
 
 ### Connect
 
