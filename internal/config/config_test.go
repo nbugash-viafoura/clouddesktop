@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				},
+			},
 			wantError: false,
 		},
 		{
@@ -35,7 +36,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				},
+			},
 			wantError: true,
 			errorMsg:  "aws_profile is required",
 		},
@@ -47,19 +48,19 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				},
+			},
 			wantError: true,
 			errorMsg:  "region is required",
 		},
 		{
 			name: "missing developer_name",
 			cfg: &Config{
-				AWSProfile:    "test-developers",
-				Region:        "us-east-1",
-				InstanceType:  "m7i.xlarge",
-				SSHPublicKey:  "ssh-ed25519 AAAAC test",
-				SSHKeyPath:    "/home/test/.ssh/key",
-				},
+				AWSProfile:   "test-developers",
+				Region:       "us-east-1",
+				InstanceType: "m7i.xlarge",
+				SSHPublicKey: "ssh-ed25519 AAAAC test",
+				SSHKeyPath:   "/home/test/.ssh/key",
+			},
 			wantError: true,
 			errorMsg:  "developer_name is required",
 		},
@@ -72,7 +73,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "",
 				DeveloperName: "john-dev",
-				},
+			},
 			wantError: true,
 			errorMsg:  "ssh_key_path is required",
 		},
@@ -85,7 +86,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				},
+			},
 			wantError: true,
 			errorMsg:  "instance_type is required",
 		},
@@ -98,7 +99,7 @@ func TestValidateRequiredFields(t *testing.T) {
 				SSHPublicKey:  "",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				},
+			},
 			wantError: true,
 			errorMsg:  "ssh_public_key is required",
 		},
@@ -140,7 +141,7 @@ func TestValidateAWSRegion(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				}
+			}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -179,7 +180,7 @@ func TestValidateInstanceType(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				}
+			}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -216,7 +217,7 @@ func TestValidateDeveloperName(t *testing.T) {
 				SSHPublicKey:  "ssh-ed25519 AAAAC test",
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: tt.devName,
-				}
+			}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -251,7 +252,7 @@ func TestValidateSSHPublicKey(t *testing.T) {
 				SSHPublicKey:  tt.sshKey,
 				SSHKeyPath:    "/home/test/.ssh/key",
 				DeveloperName: "john-dev",
-				}
+			}
 			err := cfg.Validate()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
@@ -482,3 +483,157 @@ func TestErrConfigNotFound(t *testing.T) {
 	}
 }
 
+// validConfig returns a config that passes validation.
+func validConfig() *Config {
+	return &Config{
+		AWSProfile:    "test-developers",
+		Region:        "us-east-1",
+		InstanceType:  "m7i.xlarge",
+		SSHPublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 test@host",
+		SSHKeyPath:    "/home/test/.ssh/key",
+		DeveloperName: "john-dev",
+	}
+}
+
+func TestDefaultEnvironment_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := validConfig()
+	cfg.DefaultEnvironment = "build"
+
+	if err := SaveTo(path, cfg); err != nil {
+		t.Fatalf("SaveTo() unexpected error: %v", err)
+	}
+	loaded, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom() unexpected error: %v", err)
+	}
+
+	if loaded.DefaultEnvironment != "build" {
+		t.Errorf("DefaultEnvironment = %q, want build", loaded.DefaultEnvironment)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "default_environment: build") {
+		t.Errorf("saved file should contain default_environment, got:\n%s", data)
+	}
+}
+
+func TestValidateDefaultEnvironment(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "unset", value: ""},
+		{name: "valid name", value: "perf-test"},
+		{name: "invalid name", value: "Bad_Name", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.DefaultEnvironment = tt.value
+
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestSaveTo_LeavesNoTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	for i := 0; i < 2; i++ {
+		if err := SaveTo(path, validConfig()); err != nil {
+			t.Fatalf("SaveTo() unexpected error: %v", err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("directory has %d entries, want only config.yaml", len(entries))
+	}
+}
+
+func TestUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := SaveTo(path, validConfig()); err != nil {
+		t.Fatal(err)
+	}
+
+	err := updateAt(path, func(cfg *Config) error {
+		cfg.DefaultEnvironment = "build"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("updateAt() unexpected error: %v", err)
+	}
+
+	loaded, err := LoadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DefaultEnvironment != "build" {
+		t.Errorf("DefaultEnvironment = %q, want build", loaded.DefaultEnvironment)
+	}
+}
+
+func TestUpdate_MutateErrorLeavesFileUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := SaveTo(path, validConfig()); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+
+	err := updateAt(path, func(cfg *Config) error {
+		cfg.DefaultEnvironment = "build"
+		return errors.New("boom")
+	})
+	if err == nil {
+		t.Fatal("expected the mutate error to be returned")
+	}
+
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("config file changed although mutate failed")
+	}
+}
+
+func TestUpdate_MissingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	err := updateAt(path, func(cfg *Config) error { return nil })
+	if !errors.Is(err, ErrConfigNotFound) {
+		t.Errorf("error = %v, want ErrConfigNotFound", err)
+	}
+}
+
+func TestIsValidInstanceType(t *testing.T) {
+	for _, it := range ValidInstanceTypes {
+		if !IsValidInstanceType(it.Value) {
+			t.Errorf("IsValidInstanceType(%q) = false, want true", it.Value)
+		}
+	}
+	if IsValidInstanceType("m5.large") {
+		t.Error("IsValidInstanceType(m5.large) = true, want false")
+	}
+}
+
+func TestIsValidStorageSize(t *testing.T) {
+	for _, size := range ValidStorageSizes {
+		if !IsValidStorageSize(size) {
+			t.Errorf("IsValidStorageSize(%d) = false, want true", size)
+		}
+	}
+	if IsValidStorageSize(150) {
+		t.Error("IsValidStorageSize(150) = true, want false")
+	}
+}

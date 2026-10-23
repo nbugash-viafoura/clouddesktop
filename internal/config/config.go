@@ -8,17 +8,27 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/nbugash-viafoura/clouddesktop/internal/environment"
+	"github.com/nbugash-viafoura/clouddesktop/internal/fsutil"
 	"gopkg.in/yaml.v3"
 )
 
 // Config represents the clouddesktop configuration stored in ~/.clouddesktop/config.yaml.
+// It holds developer-level settings only: which environments exist is always read
+// from AWS tags, never stored here.
 type Config struct {
-	AWSProfile       string `yaml:"aws_profile"`
-	Region           string `yaml:"region"`
-	InstanceType     string `yaml:"instance_type"`
-	SSHPublicKey     string `yaml:"ssh_public_key"`
-	SSHKeyPath       string `yaml:"ssh_key_path"`
-	DeveloperName    string `yaml:"developer_name"`
+	AWSProfile    string `yaml:"aws_profile"`
+	Region        string `yaml:"region"`
+	InstanceType  string `yaml:"instance_type"` // default machine size for new environments
+	SSHPublicKey  string `yaml:"ssh_public_key"`
+	SSHKeyPath    string `yaml:"ssh_key_path"`
+	DeveloperName string `yaml:"developer_name"`
+
+	// DefaultEnvironment is the environment commands act on when the developer
+	// has more than one environment and names none. Empty means unset.
+	DefaultEnvironment string `yaml:"default_environment,omitempty"`
+
+	// v1 only: read for migration, cleared before saving.
 	InstanceID       string `yaml:"instance_id,omitempty"`
 	RootVolumeSizeGB int    `yaml:"root_volume_size_gb,omitempty"`
 }
@@ -71,10 +81,20 @@ var ValidInstanceTypes = []InstanceTypeOption{
 	{Label: "t3.2xlarge   ( 8 vCPU,  32 GB)", Value: "t3.2xlarge"},
 }
 
-// isValidInstanceType checks if the given instance type is in the supported list.
-func isValidInstanceType(instanceType string) bool {
+// IsValidInstanceType reports whether the given instance type is in the supported list.
+func IsValidInstanceType(instanceType string) bool {
 	for _, it := range ValidInstanceTypes {
 		if it.Value == instanceType {
+			return true
+		}
+	}
+	return false
+}
+
+// IsValidStorageSize reports whether sizeGB is one of the supported root volume sizes.
+func IsValidStorageSize(sizeGB int) bool {
+	for _, size := range ValidStorageSizes {
+		if size == sizeGB {
 			return true
 		}
 	}
@@ -106,7 +126,7 @@ func (c *Config) Validate() error {
 	if c.InstanceType == "" {
 		return errors.New("instance_type is required (default: m7i.xlarge)")
 	}
-	if !isValidInstanceType(c.InstanceType) {
+	if !IsValidInstanceType(c.InstanceType) {
 		return fmt.Errorf("instance_type '%s' is not valid (supported: m7i.xlarge, m7i.2xlarge, etc.)", c.InstanceType)
 	}
 
@@ -130,6 +150,12 @@ func (c *Config) Validate() error {
 		return errors.New("ssh_key_path is required")
 	}
 
+	if c.DefaultEnvironment != "" {
+		if err := environment.ValidateName(c.DefaultEnvironment); err != nil {
+			return fmt.Errorf("default_environment: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -151,24 +177,41 @@ func Load() (*Config, error) {
 
 // LoadFrom reads and parses the clouddesktop configuration from the given file path.
 func LoadFrom(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	cfg, _, err := loadFromPath(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrConfigNotFound
-		}
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, err
 	}
 
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("config file is invalid YAML: %w", err)
+	if cfg.isLegacy() {
+		if cfg, err = migrateLegacy(path); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
-	return &cfg, nil
+	return cfg, nil
+}
+
+// loadFromPath reads and parses the config file without validating it,
+// returning the raw bytes as well so migration can back them up unchanged.
+func loadFromPath(path string) (*Config, []byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, ErrConfigNotFound
+		}
+		return nil, nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, nil, fmt.Errorf("config file is invalid YAML: %w", err)
+	}
+
+	return &cfg, data, nil
 }
 
 // Save writes the clouddesktop configuration to the default config path.
@@ -198,7 +241,7 @@ func SaveTo(path string, cfg *Config) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

@@ -13,12 +13,19 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/nbugash-viafoura/clouddesktop/internal/environment"
 )
 
 const (
-	pollInitialInterval = 2 * time.Second
-	pollMaxInterval     = 15 * time.Second
+	pollInitialInterval      = 2 * time.Second
+	pollMaxInterval          = 15 * time.Second
 	pollMaxConsecutiveErrors = 10
+
+	// tagEnvironment holds the environment name on instances and their root volumes.
+	// It is namespaced so it can't collide with an org-wide "Environment" tag policy.
+	tagEnvironment = "CloudDesktopEnv"
+
+	defaultRootVolumeSizeGB int32 = 100
 )
 
 // ec2api is the subset of the AWS EC2 SDK client used by EC2Client.
@@ -35,6 +42,7 @@ type ec2api interface {
 	DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
 	ModifyVolume(ctx context.Context, params *ec2.ModifyVolumeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVolumeOutput, error)
 	DescribeVolumesModifications(ctx context.Context, params *ec2.DescribeVolumesModificationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesModificationsOutput, error)
+	CreateTags(ctx context.Context, params *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error)
 }
 
 // EC2Client wraps AWS EC2 API operations for managing cloud desktop instances.
@@ -85,6 +93,9 @@ func (c *EC2Client) StartInstance(ctx context.Context, instanceID string) error 
 		InstanceIds: []string{instanceID},
 	})
 	if err != nil {
+		if capErr := capacityError(err, "StartInstances", ""); capErr != nil {
+			return capErr
+		}
 		return fmt.Errorf("failed to start instance %s: %w", instanceID, err)
 	}
 	return nil
@@ -145,44 +156,111 @@ type RunInstanceParams struct {
 	InstanceProfileName string
 	UserData            []byte
 	DeveloperName       string
+	EnvironmentName     string
+	RootVolumeSizeGB    int32 // defaults to 100 when zero
 }
 
-// FindInstanceByDeveloper searches for a non-terminated EC2 instance belonging
-// to the given developer. Returns nil, nil if no instance is found.
-func (c *EC2Client) FindInstanceByDeveloper(ctx context.Context, developerName string) (*InstanceInfo, error) {
-	output, err := c.client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+// ListEnvironments returns every non-terminated environment owned by the
+// developer, sorted by name. An instance without the environment tag was
+// created before multiple environments existed and is reported as the legacy
+// "main" environment. Two instances with the same environment name are an error.
+func (c *EC2Client) ListEnvironments(ctx context.Context, developerName string) ([]environment.Environment, error) {
+	paginator := ec2.NewDescribeInstancesPaginator(c.client, &ec2.DescribeInstancesInput{
 		Filters: []types.Filter{
 			{Name: strPtr("tag:Developer"), Values: []string{developerName}},
 			{Name: strPtr("tag:Project"), Values: []string{"clouddesktop"}},
 			{Name: strPtr("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
 		},
 	})
+
+	var envs []environment.Environment
+	instanceByName := make(map[string]string)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list environments for developer %s: %w", developerName, err)
+		}
+		for _, reservation := range page.Reservations {
+			for _, inst := range reservation.Instances {
+				env := environmentFromInstance(inst)
+				if existing, ok := instanceByName[env.Name]; ok {
+					return nil, fmt.Errorf("two instances are tagged as environment %q: %s, %s\nTerminate the extra instance in the AWS console, then retry", env.Name, existing, env.InstanceID)
+				}
+				instanceByName[env.Name] = env.InstanceID
+				envs = append(envs, env)
+			}
+		}
+	}
+
+	environment.SortByName(envs)
+	return envs, nil
+}
+
+// environmentFromInstance maps an EC2 instance to an Environment.
+func environmentFromInstance(inst types.Instance) environment.Environment {
+	env := environment.Environment{
+		InstanceID:   aws.ToString(inst.InstanceId),
+		InstanceType: string(inst.InstanceType),
+		RootVolumeID: rootVolumeID(inst),
+		PrivateIP:    aws.ToString(inst.PrivateIpAddress),
+		LaunchTime:   inst.LaunchTime,
+	}
+	if inst.State != nil {
+		env.State = string(inst.State.Name)
+	}
+	if name := tagValue(inst.Tags, tagEnvironment); name != "" {
+		env.Name = name
+	} else {
+		env.Name = environment.LegacyName
+		env.Legacy = true
+	}
+	return env
+}
+
+// rootVolumeID returns the ID of the EBS volume attached as the instance's root device.
+func rootVolumeID(inst types.Instance) string {
+	if inst.RootDeviceName == nil {
+		return ""
+	}
+	for _, bdm := range inst.BlockDeviceMappings {
+		if aws.ToString(bdm.DeviceName) == *inst.RootDeviceName && bdm.Ebs != nil {
+			return aws.ToString(bdm.Ebs.VolumeId)
+		}
+	}
+	return ""
+}
+
+// tagValue returns the value of the tag with the given key, or "" when absent.
+func tagValue(tags []types.Tag, key string) string {
+	for _, tag := range tags {
+		if aws.ToString(tag.Key) == key {
+			return aws.ToString(tag.Value)
+		}
+	}
+	return ""
+}
+
+// TagEnvironment records the environment name on an instance and its root
+// volume. It is used to tag instances created before multiple environments existed.
+func (c *EC2Client) TagEnvironment(ctx context.Context, instanceID, rootVolumeID, name string) error {
+	resources := []string{instanceID}
+	if rootVolumeID != "" {
+		resources = append(resources, rootVolumeID)
+	}
+	_, err := c.client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: resources,
+		Tags:      []types.Tag{{Key: strPtr(tagEnvironment), Value: strPtr(name)}},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to find instance for developer %s: %w", developerName, err)
+		return fmt.Errorf("failed to tag instance %s with environment %s: %w", instanceID, name, err)
 	}
-
-	for _, reservation := range output.Reservations {
-		if len(reservation.Instances) == 0 {
-			continue
-		}
-		inst := reservation.Instances[0]
-		info := &InstanceInfo{
-			InstanceID:   aws.ToString(inst.InstanceId),
-			State:        string(inst.State.Name),
-			InstanceType: string(inst.InstanceType),
-			LaunchTime:   inst.LaunchTime,
-		}
-		if inst.PrivateIpAddress != nil {
-			info.PrivateIP = *inst.PrivateIpAddress
-		}
-		return info, nil
-	}
-
-	return nil, nil
+	return nil
 }
 
 // ImportSSHKeyPair imports an SSH public key as an EC2 key pair. If a key pair
-// with the same name already exists, it is deleted first for idempotency.
+// with the same name already exists, it is deleted first for idempotency. A
+// duplicate error is treated as success: the key pair is shared by all of a
+// developer's environments, so a concurrent create may have just imported it.
 func (c *EC2Client) ImportSSHKeyPair(ctx context.Context, keyName, publicKey string) error {
 	// Delete existing key pair first (idempotent -- ignores NotFound).
 	_, _ = c.client.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{
@@ -194,6 +272,9 @@ func (c *EC2Client) ImportSSHKeyPair(ctx context.Context, keyName, publicKey str
 		PublicKeyMaterial: []byte(publicKey),
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "InvalidKeyPair.Duplicate") {
+			return nil
+		}
 		return fmt.Errorf("failed to import key pair %s: %w", keyName, err)
 	}
 	return nil
@@ -265,39 +346,45 @@ func (c *EC2Client) FindUbuntuAMI(ctx context.Context) (string, error) {
 // RunInstance launches a new EC2 instance with the specified parameters.
 // Returns the instance ID of the newly created instance.
 func (c *EC2Client) RunInstance(ctx context.Context, params RunInstanceParams) (string, error) {
+	name := "clouddesktop-" + params.DeveloperName + "-" + params.EnvironmentName
 	tagSpec := []types.TagSpecification{
 		{
 			ResourceType: types.ResourceTypeInstance,
 			Tags: []types.Tag{
-				{Key: strPtr("Name"), Value: strPtr("clouddesktop-" + params.DeveloperName)},
+				{Key: strPtr("Name"), Value: strPtr(name)},
 				{Key: strPtr("Developer"), Value: strPtr(params.DeveloperName)},
 				{Key: strPtr("Project"), Value: strPtr("clouddesktop")},
 				{Key: strPtr("ManagedBy"), Value: strPtr("clouddesktop-cli")},
+				{Key: strPtr(tagEnvironment), Value: strPtr(params.EnvironmentName)},
 			},
 		},
 		{
 			ResourceType: types.ResourceTypeVolume,
 			Tags: []types.Tag{
-				{Key: strPtr("Name"), Value: strPtr("clouddesktop-" + params.DeveloperName + "-root")},
+				{Key: strPtr("Name"), Value: strPtr(name + "-root")},
 				{Key: strPtr("Developer"), Value: strPtr(params.DeveloperName)},
+				{Key: strPtr(tagEnvironment), Value: strPtr(params.EnvironmentName)},
 			},
 		},
 	}
 
 	var one int32 = 1
-	var volumeSize int32 = 100
+	volumeSize := params.RootVolumeSizeGB
+	if volumeSize == 0 {
+		volumeSize = defaultRootVolumeSizeGB
+	}
 	var iops int32 = 3000
 	var throughput int32 = 300
 	var hopLimit int32 = 1
 
 	input := &ec2.RunInstancesInput{
-		ImageId:      &params.AMIID,
-		InstanceType: types.InstanceType(params.InstanceType),
-		MinCount:     &one,
-		MaxCount:     &one,
-		SubnetId:     &params.SubnetID,
+		ImageId:          &params.AMIID,
+		InstanceType:     types.InstanceType(params.InstanceType),
+		MinCount:         &one,
+		MaxCount:         &one,
+		SubnetId:         &params.SubnetID,
 		SecurityGroupIds: []string{params.SecurityGroupID},
-		KeyName:      &params.KeyName,
+		KeyName:          &params.KeyName,
 		IamInstanceProfile: &types.IamInstanceProfileSpecification{
 			Name: &params.InstanceProfileName,
 		},
@@ -326,6 +413,9 @@ func (c *EC2Client) RunInstance(ctx context.Context, params RunInstanceParams) (
 
 	output, err := c.client.RunInstances(ctx, input)
 	if err != nil {
+		if capErr := capacityError(err, "RunInstances", params.InstanceType); capErr != nil {
+			return "", capErr
+		}
 		return "", fmt.Errorf("failed to launch instance: %w", err)
 	}
 
@@ -426,6 +516,27 @@ func isTransientError(err error) bool {
 	return false
 }
 
+// capacityError turns an account quota or AWS capacity error into a message that
+// names the limit and the next step, since the CLI prints only Error(). It
+// returns nil for any other error. Codes are matched in the message, like
+// isTransientError, so no SDK error types are needed.
+func capacityError(err error, operation, instanceType string) *AWSError {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "VcpuLimitExceeded"), strings.Contains(msg, "InstanceLimitExceeded"):
+		return NewError(ErrorTypeCapacity, "EC2", operation,
+			"the AWS account's on-demand instance limit has been reached\nStop environments you aren't using, or ask the platform team to raise the limit.", err)
+	case strings.Contains(msg, "InsufficientInstanceCapacity"):
+		if instanceType == "" {
+			instanceType = "this instance type"
+		}
+		return NewError(ErrorTypeCapacity, "EC2", operation,
+			fmt.Sprintf("AWS has no spare capacity for %s right now\nTry again in a few minutes, or choose another instance type.", instanceType), err)
+	default:
+		return nil
+	}
+}
+
 // isNotFoundError checks if the error is a "not found" result from DescribeInstance.
 // This is expected briefly after RunInstances due to AWS eventual consistency.
 func isNotFoundError(err error) bool {
@@ -458,14 +569,7 @@ func (c *EC2Client) GetRootVolumeInfo(ctx context.Context, instanceID string) (v
 		return "", 0, fmt.Errorf("instance %s has no root device name", instanceID)
 	}
 
-	var rootVolumeID string
-	for _, bdm := range inst.BlockDeviceMappings {
-		if bdm.DeviceName != nil && *bdm.DeviceName == *inst.RootDeviceName && bdm.Ebs != nil && bdm.Ebs.VolumeId != nil {
-			rootVolumeID = *bdm.Ebs.VolumeId
-			break
-		}
-	}
-
+	rootVolumeID := rootVolumeID(inst)
 	if rootVolumeID == "" {
 		return "", 0, fmt.Errorf("no root volume found for instance %s", instanceID)
 	}
@@ -487,6 +591,24 @@ func (c *EC2Client) GetRootVolumeInfo(ctx context.Context, instanceID string) (v
 	}
 
 	return rootVolumeID, *vol.Size, nil
+}
+
+// RootVolumeSizes returns the size in GB of each given volume with one
+// DescribeVolumes call, so listing cost doesn't grow with the number of environments.
+func (c *EC2Client) RootVolumeSizes(ctx context.Context, volumeIDs []string) (map[string]int32, error) {
+	sizes := make(map[string]int32, len(volumeIDs))
+	if len(volumeIDs) == 0 {
+		return sizes, nil
+	}
+
+	output, err := c.client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{VolumeIds: volumeIDs})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe volumes: %w", err)
+	}
+	for _, vol := range output.Volumes {
+		sizes[aws.ToString(vol.VolumeId)] = aws.ToInt32(vol.Size)
+	}
+	return sizes, nil
 }
 
 // ModifyRootVolume resizes the given EBS volume to newSizeGB.

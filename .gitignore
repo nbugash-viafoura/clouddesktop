@@ -22,3 +22,6 @@ coverage.out
 *.tfstate.backup
 .terraform/
 .terraform.lock.hcl
+
+# Go test binaries
+*.test

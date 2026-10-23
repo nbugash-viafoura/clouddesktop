@@ -20,6 +20,8 @@ A self-service CLI tool for provisioning and managing personal cloud development
 - [Usage](#usage)
   - [First-Time Setup](#first-time-setup)
   - [Provision and Start](#provision-and-start)
+  - [Multiple Environments](#multiple-environments)
+  - [Upgrading from a Single-Environment Release](#upgrading-from-a-single-environment-release)
   - [Connect](#connect)
   - [Check Status](#check-status)
   - [Stop](#stop)
@@ -32,7 +34,7 @@ A self-service CLI tool for provisioning and managing personal cloud development
 - [Daily Workflow](#daily-workflow)
 - [What's Installed on the Instance](#whats-installed-on-the-instance)
 - [Architecture](#architecture)
-  - [Instance State](#instance-state)
+  - [Environment State](#environment-state)
 - [Repository Structure](#repository-structure)
 - [Contributing](#contributing)
   - [Scope Labels Are Mandatory](#scope-labels-are-mandatory)
@@ -52,12 +54,12 @@ Local developer machines allocate 8 CPU + 16 GB RAM to Colima(if you're using Ma
 
 ## How It Works
 
-- **Provision**: `clouddesktop up` creates an EC2 instance via the AWS SDK on first run (~2 minutes)
+- **Provision**: `clouddesktop up` creates an EC2 instance via the AWS SDK on first run (~2 minutes). `clouddesktop create <name>` adds more environments alongside it
 - **Start/Stop**: subsequent `clouddesktop up` and `clouddesktop down` start and stop the instance (~30 seconds)
 - **Persist**: stopping an instance preserves the EBS volume — repos, Docker image cache, Gradle/npm caches, shell history all survive across sessions
 - **Connect**: SSH tunneled through AWS SSM Session Manager (zero open inbound ports). JetBrains Gateway and VS Code Remote SSH work transparently via the SSH config entry `clouddesktop` writes automatically
 - **S3 Mount**: each developer gets a personal S3 bucket mounted at `/home/ubuntu/s3` via [Mountpoint for Amazon S3](https://github.com/awslabs/mountpoint-s3). Files published to the bucket are visible as local files for ETL workloads. The mount persists across instance stop/start cycles.
-- **Destroy**: `clouddesktop destroy --confirm` terminates the instance and deletes all data (including the S3 bucket). Requires explicit confirmation.
+- **Destroy**: `clouddesktop destroy [name] --confirm` terminates one environment and deletes the data on its disk. Your other environments and your personal S3 bucket are kept. Requires explicit confirmation.
 
 ### Auto-Stop
 
@@ -200,12 +202,14 @@ clouddesktop init
 Prompts for:
 - **Developer name** — lowercase, used in AWS resource naming (e.g., `john`)
 - **AWS profile** — picker of your configured AWS profiles; defaults to `test-terraform`
-- **Instance type** — picker of supported types; defaults to `m7i.xlarge` (4 vCPU, 16 GB)
+- **Default instance type for new environments** — picker of supported types; defaults to `m7i.xlarge` (4 vCPU, 16 GB)
 - **SSH public key** — picker of the `.pub` keys found in `~/.ssh/`
 
 Region is fixed to `us-east-1`.
 
 Writes configuration to `~/.clouddesktop/config.yaml`.
+
+If you already have environments (for example on a new laptop), `init` finds them right after you pick the AWS profile, reminds you to select the SSH key they were created with, asks which one should be your default, and restores their SSH aliases. Nothing is re-created. `init` refuses to run while a config exists and you have environments, because your developer name and SSH key can't change under existing environments.
 
 ### Provision and Start
 
@@ -215,13 +219,13 @@ clouddesktop up
 
 On first run, this provisions an EC2 instance (~2 minutes for infrastructure, ~10 minutes for bootstrap). On subsequent runs, it starts the existing stopped instance (~30 seconds).
 
-On first run, `clouddesktop up` also creates a personal S3 bucket (`clouddesktop-<your-name>`) and mounts it at `/home/ubuntu/s3`. For existing instances that predate this feature, running `clouddesktop up` will automatically set up the S3 mount.
+On first run, `clouddesktop up` provisions an environment named `main`, which becomes your default. It also creates a personal S3 bucket (`clouddesktop-<your-name>`) shared by all your environments. Once bootstrap finishes, run `clouddesktop up` again to mount it at `/home/ubuntu/s3`. Every later `up` checks the mount and repairs it if needed.
 
-After the instance is running, `clouddesktop up` automatically writes an SSH config entry to `~/.ssh/config`:
+After the instance is running, `clouddesktop up` writes one SSH config entry per environment to `~/.ssh/config`:
 
 ```
 # BEGIN clouddesktop managed block
-Host clouddesktop
+Host clouddesktop-main clouddesktop
   HostName <instance-id>
   User ubuntu
   IdentityFile ~/.ssh/<your-key>
@@ -233,51 +237,98 @@ Host clouddesktop
 # END clouddesktop managed block
 ```
 
+Each environment gets the alias `clouddesktop-<name>`; the environment named `main` also answers to `clouddesktop`. The block is rebuilt from your current environments on every write, so it never holds stale entries.
+
 The `ProxyCommand` points at a generated wrapper script (`~/.ssh/clouddesktop-ssm-proxy.sh`) rather than an inline command. The wrapper resolves the absolute paths to `aws` and `session-manager-plugin`, then runs `aws ssm start-session` against your instance using the AWS profile and region from your config. The block is delimited by the `# BEGIN/END clouddesktop managed block` markers so the CLI can update it in place without disturbing the rest of `~/.ssh/config` (your existing config is backed up to `~/.ssh/config.clouddesktop-backup` on each write).
+
+### Multiple Environments
+
+You can own several environments at once, for example an everyday `main` plus a larger `build` machine. Name each one after its function, in one word (`build`, `service`, `ci`). Names use 1-20 lowercase letters, digits or hyphens, starting and ending with a letter or digit.
+
+```bash
+clouddesktop create build --instance-type m7i.4xlarge --storage-size 300
+clouddesktop list          # every environment with its state, type and disk, plus your default
+clouddesktop use build     # make build your default
+clouddesktop ssh build     # every environment command takes an optional name
+```
+
+- Without a name, a command uses your only environment, or your default when you have several. It always prints `Environment: <name> (<instance-id>)` before it acts.
+- Your first environment becomes the default. Creating more doesn't change it; switch with `clouddesktop use <name>`.
+- `clouddesktop down --all` stops every running environment.
+- `destroy` never uses the default: it needs the name whenever you have more than one environment.
+- `create` doesn't mount the S3 bucket while bootstrap is still running. Run `clouddesktop up <name>` once bootstrap finishes (~10 minutes).
+- The list of environments comes from EC2 tags (`CloudDesktopEnv`), not from local files, so a new laptop only needs `clouddesktop init`.
+
+**For AWS admins:** activate `Developer` and `CloudDesktopEnv` as cost allocation tags in the Billing console to see costs per developer and environment.
+
+### Upgrading from a Single-Environment Release
+
+Nothing needs to be re-provisioned. The first command you run with the new release migrates `~/.clouddesktop/config.yaml`:
+
+- Your existing instance becomes the environment `main` and your default, so commands you run without a name keep acting on it.
+- `ssh clouddesktop` and IDE hosts saved as `clouddesktop` keep reaching the same machine.
+- The original config is kept as `~/.clouddesktop/config.yaml.v1-backup`.
+- The instance itself isn't changed. It only gets a `CloudDesktopEnv=main` tag, which is skipped if your AWS permissions don't allow tagging.
+
+What behaves differently after the upgrade:
+
+| Area | Before | Now |
+|---|---|---|
+| `destroy` | Deleted the instance, the S3 bucket and its contents, the key pair, and `config.yaml` | Deletes only the named environment and its disk. The S3 bucket is kept until you run `s3-reset --confirm`, the key pair goes with your last environment, and `config.yaml` is kept, so you don't need `init` afterwards |
+| `destroy` and `s3-reset` without `--confirm` | One-line error | Shows what would be deleted, changes nothing, and still exits non-zero |
+| `init` when a config exists | Worked offline; refused only if an instance ID was stored | Needs a valid AWS session to check for environments, and refuses while you have any |
+| `ssh` | Connected straight away | Looks up the environment in AWS first, which adds a second or two |
+| `up` | Set up the S3 mount only when the bucket or its parameter was missing, so freshly provisioned instances were never mounted | Checks the mount on every run and repairs it. Right after starting a stopped instance, this can wait up to 3 minutes for SSM to reconnect |
+| Command output | Instance details only | Commands print `Environment: <name> (<instance-id>)` before acting, and `status` also shows the environment and whether it's your default. Update any scripts that parse the output |
+| Instance `Name` tag | `clouddesktop-<you>` | New environments are named `clouddesktop-<you>-<env>`. Your migrated instance keeps its old name |
+| `instance_type` in config | The current instance's type, updated by `resize-instance` | The default type for new environments. `resize-instance` no longer changes it |
+
+**Use the new release on every machine you run `clouddesktop` from.** Once you have more than one environment, an older release can't tell them apart: it picks whichever instance AWS returns first, and its `destroy` deletes the shared S3 bucket and key pair along with that instance. To go back to an older release while you still have a single environment, copy `config.yaml.v1-backup` over `config.yaml`.
 
 ### Connect
 
 ```bash
-clouddesktop ssh
+clouddesktop ssh [name]
 ```
 
 Or connect directly:
 
 ```bash
-ssh clouddesktop
+ssh clouddesktop-<name>    # or: ssh clouddesktop  (the environment named main)
 ```
 
-Both JetBrains Gateway and VS Code Remote SSH pick up the `clouddesktop` host from `~/.ssh/config` automatically.
+Both JetBrains Gateway and VS Code Remote SSH pick up the `clouddesktop-<name>` hosts from `~/.ssh/config` automatically.
 
 **JetBrains Gateway** (backend devs):
 1. Install JetBrains Gateway locally
-2. New Connection > SSH > select `clouddesktop`
+2. New Connection > SSH > select `clouddesktop-<name>`
 3. First connection downloads the IDE backend to the instance (~3-5 min, one-time)
 
 **VS Code Remote SSH** (frontend devs):
 1. Install the "Remote - SSH" extension
-2. `Cmd+Shift+P` > Remote-SSH: Connect to Host > `clouddesktop`
+2. `Cmd+Shift+P` > Remote-SSH: Connect to Host > `clouddesktop-<name>`
 
 ### Check Status
 
 ```bash
-clouddesktop status
+clouddesktop status [name]
 ```
 
-Shows instance state, type, IP address, uptime, and CloudWatch metrics (CPU, memory, disk).
+Shows the environment's state, whether it is your default, type, IP address, uptime, and CloudWatch metrics (CPU, memory, disk).
 
 ### Stop
 
 ```bash
-clouddesktop down
+clouddesktop down [name]
+clouddesktop down --all     # stop every running environment
 ```
 
-Stops the instance. All data is preserved on the EBS volume. No compute cost while stopped.
+Stops the instance. All data is preserved on the EBS volume. No compute cost while stopped. With `--all`, it reports the outcome for each environment and keeps going if one fails.
 
 ### Resize Instance Type
 
 ```bash
-clouddesktop resize-instance
+clouddesktop resize-instance [name]
 ```
 
 Presents an interactive picker of supported instance types. Stops the instance if running, applies the change, then restarts. Use this if CloudWatch metrics show you need more CPU or memory.
@@ -285,14 +336,14 @@ Presents an interactive picker of supported instance types. Stops the instance i
 ### Resize Storage
 
 ```bash
-clouddesktop resize-storage
+clouddesktop resize-storage [name]
 ```
 
 Grows the root EBS volume online — no instance stop required. Presents a picker of supported sizes larger than the current volume (100, 200, 300, 500, 1024, 1536, 2048 GB), then automatically extends the filesystem via SSM. Hard cap is 2 TB; EBS volumes cannot be shrunk.
 
 ### S3 Mount
 
-Each developer gets a personal S3 bucket mounted at `/home/ubuntu/s3` using [Mountpoint for Amazon S3](https://github.com/awslabs/mountpoint-s3). This is set up automatically during `clouddesktop up`.
+Each developer gets one personal S3 bucket, shared by all of their environments and mounted at `/home/ubuntu/s3` on each of them using [Mountpoint for Amazon S3](https://github.com/awslabs/mountpoint-s3). This is set up automatically during `clouddesktop up`.
 
 **Use cases:**
 - Receive files published to the bucket by other systems or teammates for ETL processing
@@ -300,10 +351,11 @@ Each developer gets a personal S3 bucket mounted at `/home/ubuntu/s3` using [Mou
 - Share output files by writing to `/home/ubuntu/s3`
 
 **Behavior:**
-- The bucket is created automatically on first `clouddesktop up`
+- The bucket is created with your first environment; each environment gets the mount on its first `clouddesktop up` after bootstrap
+- Files written on one environment are visible on the others
 - The mount survives `clouddesktop down` / `clouddesktop up` cycles (fstab auto-remounts on boot)
 - Files uploaded to the S3 bucket externally (console, CLI, other services) appear immediately on the instance
-- The bucket and all its contents are deleted on `clouddesktop destroy`
+- The bucket and its contents are kept when you destroy environments, including your last one. Delete it with `clouddesktop s3-reset --confirm`
 - Existing instances that predate this feature get the mount automatically on the next `clouddesktop up`
 
 **Uploading files to a developer's bucket externally:**
@@ -322,29 +374,36 @@ aws s3 cp data.csv s3://clouddesktop-<developer-name>/data.csv --profile test-de
 clouddesktop s3-reset --confirm
 ```
 
-Deletes the developer's S3 bucket (and all its contents) and removes the backing SSM parameter. This is an AWS-side operation only — it does not unmount anything on the instance, so an existing `/home/ubuntu/s3` mount keeps pointing at a bucket that no longer exists until the next `clouddesktop up`, which creates a fresh bucket and re-runs mount setup. Use this if the bucket is in a bad state or you want to start over with empty S3 storage. The `--confirm` flag is required because it deletes all bucket contents. The EC2 instance and its EBS data are untouched.
+Deletes the developer's S3 bucket (and all its contents) and removes the backing SSM parameter. It first lists every environment that uses the bucket; without `--confirm` it stops there and changes nothing. This is an AWS-side operation only — it does not unmount anything on the instances, so each environment's `/home/ubuntu/s3` mount points at a bucket that no longer exists until that environment's next `clouddesktop up`, which creates a fresh bucket and repairs the mount. Use this if the bucket is in a bad state, you want to start over with empty S3 storage, or you no longer need it after destroying your environments. The EC2 instances and their EBS data are untouched.
 
 ### Destroy
 
 ```bash
-clouddesktop destroy --confirm
+clouddesktop destroy [name] --confirm
 ```
 
-Permanently terminates the instance and deletes all associated resources (EBS volume, key pair, S3 bucket and its contents). The `--confirm` flag is required. After destroying, run `clouddesktop init` to start fresh.
+Permanently terminates one environment and deletes its EBS volume. The name is required when you have more than one environment; the default is never used. Run it without `--confirm` first to see exactly what will be destroyed.
+
+Your other environments and your personal S3 bucket are kept (delete the bucket separately with `clouddesktop s3-reset --confirm`). The shared EC2 key pair is deleted only with your last environment. Your config is kept, so you can `clouddesktop create` or `clouddesktop up` again without re-running `init`. If you destroy your default environment, the default is cleared; set a new one with `clouddesktop use <name>`.
 
 ## Commands Reference
 
 | Command | Description |
 |---|---|
-| `clouddesktop init` | One-time setup: configure AWS profile, instance type, SSH key |
-| `clouddesktop up` | Start instance (or provision on first run) |
-| `clouddesktop down` | Stop instance (data preserved) |
-| `clouddesktop status` | Show instance state, IP, uptime, metrics |
-| `clouddesktop ssh` | Open SSH session to instance |
-| `clouddesktop resize-instance` | Change instance type interactively |
-| `clouddesktop resize-storage` | Grow root EBS volume and extend filesystem online |
-| `clouddesktop s3-reset --confirm` | Delete and recreate the S3 bucket and mount |
-| `clouddesktop destroy --confirm` | Permanently delete instance and all data |
+| `clouddesktop init` | One-time setup: configure AWS profile, default instance type, SSH key; finds existing environments |
+| `clouddesktop create <name>` | Create an additional environment (`--instance-type`, `--storage-size`) |
+| `clouddesktop list` (`ls`) | List environments, their state, type and disk, your default, and your S3 bucket |
+| `clouddesktop use <name>` | Set your default environment |
+| `clouddesktop up [name]` | Start an environment (or provision `main` on first run) |
+| `clouddesktop down [name]` | Stop an environment (data preserved); `--all` stops every running one |
+| `clouddesktop status [name]` | Show an environment's state, IP, uptime, metrics |
+| `clouddesktop ssh [name]` | Open SSH session to an environment |
+| `clouddesktop resize-instance [name]` | Change an environment's instance type interactively |
+| `clouddesktop resize-storage [name]` | Grow an environment's root EBS volume and extend its filesystem online |
+| `clouddesktop s3-reset --confirm` | Delete the shared S3 bucket; each environment remounts a fresh one on its next `up` |
+| `clouddesktop destroy [name] --confirm` | Permanently delete one environment and its disk |
+
+Without a name, commands use your only environment, or your default when you have several. `destroy` needs the name whenever you have more than one environment.
 
 ## Daily Workflow
 
@@ -408,9 +467,9 @@ Developer Laptop                         AWS (us-east-1)
                                          +---------------------------+
 ```
 
-### Instance State
+### Environment State
 
-Each developer's instance configuration is stored locally in `~/.clouddesktop/config.yaml`. This file tracks the instance ID, developer name, AWS profile, region, and instance type. It is created by `clouddesktop init` and updated automatically as you provision, resize, or destroy instances.
+Which environments exist is read from EC2 tags (`Developer`, `Project` and `CloudDesktopEnv`) on every command, so nothing about individual environments is stored locally. `~/.clouddesktop/config.yaml` holds only developer settings (developer name, AWS profile, region, SSH key, the default instance type for new environments) and your default environment. It is created by `clouddesktop init` and written atomically; concurrent commands coordinate through `~/.clouddesktop/.lock`.
 
 ## Repository Structure
 
@@ -418,9 +477,11 @@ Each developer's instance configuration is stored locally in `~/.clouddesktop/co
 clouddesktop/
   cmd/clouddesktop/main.go       # CLI entry point
   internal/
-    cli/                         # One file per command (init, up, down, status, ssh, resize, resize-storage, s3-reset, destroy)
-    aws/                         # AWS SDK clients (EC2, SSM, S3, CloudWatch, STS, provisioner)
-    config/                      # ~/.clouddesktop/config.yaml read/write
+    cli/                         # One file per command (init, create, list, use, up, down, status, ssh, resize, resize-storage, s3-reset, destroy)
+    aws/                         # AWS SDK clients (EC2, SSM, S3, CloudWatch, STS, provisioner, SSH config)
+    config/                      # ~/.clouddesktop/config.yaml read/write, v1 migration, lock
+    environment/                 # Environment naming, SSH aliases, target resolution (no AWS or file I/O)
+    fsutil/                      # Atomic, symlink-safe file writes
     testing/                     # Mock AWS clients used by unit tests
     version/                     # Build-time version info (injected via ldflags)
   terraform/

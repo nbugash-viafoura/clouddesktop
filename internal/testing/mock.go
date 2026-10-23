@@ -12,20 +12,20 @@ import (
 
 // MockEC2Client is a test double for aws.EC2Client.
 type MockEC2Client struct {
-	StartInstanceFn              func(ctx context.Context, instanceID string) error
-	StopInstanceFn               func(ctx context.Context, instanceID string) error
-	DescribeInstanceFn           func(ctx context.Context, instanceID string) (*aws.InstanceInfo, error)
-	WaitUntilRunningFn           func(ctx context.Context, instanceID string) error
-	WaitUntilStoppedFn           func(ctx context.Context, instanceID string) error
-	GetRootVolumeInfoFn          func(ctx context.Context, instanceID string) (string, int32, error)
-	ModifyRootVolumeFn           func(ctx context.Context, volumeID string, newSizeGB int32) error
-	WaitUntilVolumeResizedFn     func(ctx context.Context, volumeID string) error
-	StartInstanceCalls           int
-	StopInstanceCalls            int
-	DescribeInstanceCalls        int
-	GetRootVolumeInfoCalls       int
-	ModifyRootVolumeCalls        int
-	WaitUntilVolumeResizedCalls  int
+	StartInstanceFn             func(ctx context.Context, instanceID string) error
+	StopInstanceFn              func(ctx context.Context, instanceID string) error
+	DescribeInstanceFn          func(ctx context.Context, instanceID string) (*aws.InstanceInfo, error)
+	WaitUntilRunningFn          func(ctx context.Context, instanceID string) error
+	WaitUntilStoppedFn          func(ctx context.Context, instanceID string) error
+	GetRootVolumeInfoFn         func(ctx context.Context, instanceID string) (string, int32, error)
+	ModifyRootVolumeFn          func(ctx context.Context, volumeID string, newSizeGB int32) error
+	WaitUntilVolumeResizedFn    func(ctx context.Context, volumeID string) error
+	StartInstanceCalls          int
+	StopInstanceCalls           int
+	DescribeInstanceCalls       int
+	GetRootVolumeInfoCalls      int
+	ModifyRootVolumeCalls       int
+	WaitUntilVolumeResizedCalls int
 }
 
 // StartInstance calls the mock function.
@@ -107,10 +107,10 @@ func (m *MockEC2Client) WaitUntilVolumeResized(ctx context.Context, volumeID str
 
 // MockSSMClient is a test double for aws.SSMClient.
 type MockSSMClient struct {
-	RunFilesystemExtensionFn       func(ctx context.Context, instanceID string) (string, error)
-	WaitUntilCommandCompleteFn     func(ctx context.Context, instanceID, commandID string) error
-	RunFilesystemExtensionCalls    int
-	WaitUntilCommandCompleteCalls  int
+	RunFilesystemExtensionFn      func(ctx context.Context, instanceID string) (string, error)
+	WaitUntilCommandCompleteFn    func(ctx context.Context, instanceID, commandID string) error
+	RunFilesystemExtensionCalls   int
+	WaitUntilCommandCompleteCalls int
 }
 
 // RunFilesystemExtension calls the mock function.
@@ -159,7 +159,6 @@ func TestConfig() *config.Config {
 		SSHPublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKlh4pZYi3EZg7OMPKDa1Nt2yw9Z8CZSmjQ2qC8i1nC8 test@example.com",
 		SSHKeyPath:    "/home/test/.ssh/id_ed25519",
 		DeveloperName: "john-dev",
-		InstanceID:    "i-0123456789abcdef0",
 	}
 }
 

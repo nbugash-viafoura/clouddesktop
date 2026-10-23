@@ -15,10 +15,12 @@ type Provisioner struct {
 
 // ProvisionParams holds the parameters needed to provision a new cloud desktop.
 type ProvisionParams struct {
-	DeveloperName string
-	InstanceType  string
-	SSHPublicKey  string
-	UserData      []byte
+	DeveloperName    string
+	EnvironmentName  string
+	InstanceType     string
+	RootVolumeSizeGB int32 // defaults to 100 when zero
+	SSHPublicKey     string
+	UserData         []byte
 }
 
 // ProvisionResult holds the result of a provision operation.
@@ -36,21 +38,23 @@ func NewProvisioner(ec2Client *EC2Client, ssmClient *SSMClient, s3Client *S3Clie
 	}
 }
 
-// Provision creates a new EC2 instance for the developer, or recovers an existing
-// one if found via tag-based lookup. This prevents orphaned instances when config
-// is accidentally deleted.
+// Provision creates a new EC2 instance for the developer's environment, or
+// recovers the existing instance tagged with that environment name. This
+// prevents orphaned instances when config is accidentally deleted.
 func (p *Provisioner) Provision(ctx context.Context, params ProvisionParams) (*ProvisionResult, error) {
-	// Recovery check: look for an existing non-terminated instance.
-	existing, err := p.ec2Client.FindInstanceByDeveloper(ctx, params.DeveloperName)
+	// Recovery check: look for an existing non-terminated instance for this environment.
+	envs, err := p.ec2Client.ListEnvironments(ctx, params.DeveloperName)
 	if err != nil {
 		return nil, fmt.Errorf("instance recovery check failed: %w", err)
 	}
-	if existing != nil {
-		fmt.Printf("Found existing instance %s for developer %s. Recovering.\n", existing.InstanceID, params.DeveloperName)
-		return &ProvisionResult{
-			InstanceID: existing.InstanceID,
-			Recovered:  true,
-		}, nil
+	for _, env := range envs {
+		if env.Name == params.EnvironmentName {
+			fmt.Printf("Found existing instance %s for environment %s. Recovering.\n", env.InstanceID, env.Name)
+			return &ProvisionResult{
+				InstanceID: env.InstanceID,
+				Recovered:  true,
+			}, nil
+		}
 	}
 
 	// Fetch shared infrastructure config from SSM.
@@ -65,20 +69,16 @@ func (p *Provisioner) Provision(ctx context.Context, params ProvisionParams) (*P
 		return nil, err
 	}
 
-	// Import SSH key pair (idempotent -- deletes existing first).
-	keyName := "clouddesktop-" + params.DeveloperName
+	// Import SSH key pair (idempotent -- deletes existing first). The key pair is
+	// shared by all of the developer's environments.
+	keyName := keyPairName(params.DeveloperName)
 	if err := p.ec2Client.ImportSSHKeyPair(ctx, keyName, params.SSHPublicKey); err != nil {
 		return nil, err
 	}
 
-	// Create S3 bucket for the developer.
-	bucketName := BucketName(params.DeveloperName)
-	if err := p.s3Client.CreateBucket(ctx, bucketName); err != nil {
-		return nil, fmt.Errorf("failed to create S3 bucket: %w", err)
-	}
-
-	if err := p.ssmClient.PutDeveloperS3Bucket(ctx, params.DeveloperName, bucketName); err != nil {
-		return nil, fmt.Errorf("failed to store S3 bucket param: %w", err)
+	// The developer's bucket is shared by all environments; create it only if missing.
+	if _, err := p.ensureBucket(ctx, params.DeveloperName); err != nil {
+		return nil, err
 	}
 
 	// Launch instance.
@@ -91,10 +91,11 @@ func (p *Provisioner) Provision(ctx context.Context, params ProvisionParams) (*P
 		InstanceProfileName: infraCfg.InstanceProfileName,
 		UserData:            params.UserData,
 		DeveloperName:       params.DeveloperName,
+		EnvironmentName:     params.EnvironmentName,
+		RootVolumeSizeGB:    params.RootVolumeSizeGB,
 	})
 	if err != nil {
-		// Cleanup key pair on failure.
-		_ = p.ec2Client.DeleteSSHKeyPair(ctx, keyName)
+		// The key pair is left in place: another environment's launch may be using it.
 		return nil, err
 	}
 
@@ -104,51 +105,71 @@ func (p *Provisioner) Provision(ctx context.Context, params ProvisionParams) (*P
 	}, nil
 }
 
-// Destroy terminates an EC2 instance and cleans up the associated key pair and S3 bucket.
-// All cleanup operations are best-effort to ensure maximum cleanup.
-func (p *Provisioner) Destroy(ctx context.Context, instanceID, developerName string) error {
+// Destroy terminates one environment's instance; its root volume is deleted on
+// termination. The developer's bucket is never touched: only s3-reset deletes it.
+// The shared key pair is deleted (best-effort) only when deleteKeyPair is true,
+// which callers set when no other environment remains.
+func (p *Provisioner) Destroy(ctx context.Context, instanceID, developerName string, deleteKeyPair bool) error {
 	if err := p.ec2Client.TerminateInstance(ctx, instanceID); err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
 	}
 
-	keyName := "clouddesktop-" + developerName
-	_ = p.ec2Client.DeleteSSHKeyPair(ctx, keyName)
-
-	// Best-effort S3 bucket cleanup.
-	bucketName, err := p.ssmClient.GetDeveloperS3Bucket(ctx, developerName)
-	if err == nil && bucketName != "" {
-		_ = p.s3Client.EmptyBucket(ctx, bucketName)
-		_ = p.s3Client.DeleteBucket(ctx, bucketName)
-		_ = p.ssmClient.DeleteDeveloperS3Bucket(ctx, developerName)
+	if deleteKeyPair {
+		_ = p.ec2Client.DeleteSSHKeyPair(ctx, keyPairName(developerName))
 	}
 
 	return nil
 }
 
-// SetupS3Mount creates the S3 bucket (if needed) and sends an SSM command to mount it
-// on an already-running instance. Used for existing instances that predate this feature.
-func (p *Provisioner) SetupS3Mount(ctx context.Context, instanceID, developerName string) error {
+// ensureBucket returns the developer's bucket name, creating the bucket and its
+// SSM parameter when they are missing or the parameter points at a deleted bucket.
+func (p *Provisioner) ensureBucket(ctx context.Context, developerName string) (string, error) {
 	bucketName, err := p.ssmClient.GetDeveloperS3Bucket(ctx, developerName)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	if bucketName == "" {
-		bucketName = BucketName(developerName)
-		if err := p.s3Client.CreateBucket(ctx, bucketName); err != nil {
-			return fmt.Errorf("failed to create S3 bucket: %w", err)
+	if bucketName != "" {
+		exists, err := p.s3Client.BucketExists(ctx, bucketName)
+		if err != nil {
+			return "", err
 		}
-		if err := p.ssmClient.PutDeveloperS3Bucket(ctx, developerName, bucketName); err != nil {
-			return fmt.Errorf("failed to store S3 bucket param: %w", err)
+		if exists {
+			return bucketName, nil
 		}
+		fmt.Println("S3 bucket no longer exists. Recreating it...")
 	}
 
-	cmdID, err := p.ssmClient.RunS3Mount(ctx, instanceID, bucketName)
+	bucketName = BucketName(developerName)
+	if err := p.s3Client.CreateBucket(ctx, bucketName); err != nil {
+		return "", fmt.Errorf("failed to create S3 bucket: %w", err)
+	}
+	if err := p.ssmClient.PutDeveloperS3Bucket(ctx, developerName, bucketName); err != nil {
+		return "", fmt.Errorf("failed to store S3 bucket param: %w", err)
+	}
+	return bucketName, nil
+}
+
+// keyPairName returns the EC2 key pair shared by all of a developer's environments.
+func keyPairName(developerName string) string {
+	return "clouddesktop-" + developerName
+}
+
+// EnsureS3Mount makes sure the developer's bucket exists and is mounted on the
+// given instance. The mount command runs on every call: the script does nothing
+// when the bucket is already mounted and healthy, and repairs a stale mount.
+func (p *Provisioner) EnsureS3Mount(ctx context.Context, instanceID, developerName string) error {
+	bucketName, err := p.ensureBucket(ctx, developerName)
 	if err != nil {
 		return err
 	}
 
-	return p.ssmClient.WaitUntilCommandComplete(ctx, instanceID, cmdID)
+	commandID, err := p.ssmClient.RunS3Mount(ctx, instanceID, bucketName)
+	if err != nil {
+		return err
+	}
+
+	return p.ssmClient.WaitUntilCommandComplete(ctx, instanceID, commandID)
 }
 
 // Resize changes the instance type of a stopped EC2 instance.

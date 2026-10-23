@@ -14,10 +14,10 @@ import (
 )
 
 type mockSSMAPI struct {
-	params                   map[string]string
-	err                      error
-	sendCommandFn            func(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error)
-	getCommandInvocationFn   func(ctx context.Context, params *ssm.GetCommandInvocationInput, optFns ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error)
+	params                 map[string]string
+	err                    error
+	sendCommandFn          func(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error)
+	getCommandInvocationFn func(ctx context.Context, params *ssm.GetCommandInvocationInput, optFns ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error)
 }
 
 func (m *mockSSMAPI) GetParameter(_ context.Context, input *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
@@ -82,6 +82,9 @@ func fastSSMClient(api ssmapi) *SSMClient {
 	c := newSSMClientWithAPI(api)
 	c.pollInitialInterval = 1 * time.Millisecond
 	c.pollMaxInterval = 5 * time.Millisecond
+	c.sendRetryInitialInterval = 1 * time.Millisecond
+	c.sendRetryMaxInterval = 2 * time.Millisecond
+	c.sendRetryLimit = 50 * time.Millisecond
 	return c
 }
 
@@ -306,5 +309,132 @@ func TestRunFilesystemExtension_ScriptSentToInstance(t *testing.T) {
 	}
 	if !strings.Contains(capturedScript, "resize2fs") {
 		t.Errorf("script does not contain 'resize2fs': %s", capturedScript)
+	}
+}
+
+// --- RunS3Mount script ---
+
+func captureScript(t *testing.T, send func(client *SSMClient) error) string {
+	t.Helper()
+	var script string
+	mock := &mockSSMAPI{
+		sendCommandFn: func(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
+			script = params.Parameters["commands"][0]
+			return &ssm.SendCommandOutput{Command: &ssmtypes.Command{CommandId: aws.String("cmd-1")}}, nil
+		},
+	}
+	if err := send(fastSSMClient(mock)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return script
+}
+
+func TestRunS3Mount_Script(t *testing.T) {
+	script := captureScript(t, func(client *SSMClient) error {
+		_, err := client.RunS3Mount(context.Background(), "i-123", "clouddesktop-john-dev")
+		return err
+	})
+
+	guard := strings.Index(script, "/var/log/bootstrap-system-complete")
+	healthy := strings.Index(script, "mountpoint -q")
+	umount := strings.Index(script, "umount")
+
+	if guard == -1 || !strings.Contains(script, `echo "bootstrap in progress" >&2`) {
+		t.Errorf("script must report bootstrap in progress on stderr:\n%s", script)
+	}
+	if healthy == -1 || !strings.Contains(script, "timeout 10 ls") || !strings.Contains(script, "/etc/fstab") {
+		t.Errorf("script must check for a healthy mount of the right bucket:\n%s", script)
+	}
+	if guard >= healthy || healthy >= umount {
+		t.Errorf("expected bootstrap guard, then healthy-mount check, then umount; got positions %d, %d, %d", guard, healthy, umount)
+	}
+	if !strings.Contains(script, "clouddesktop-john-dev") {
+		t.Errorf("script does not reference the bucket:\n%s", script)
+	}
+	if !strings.Contains(script, ">> /etc/fstab") {
+		t.Errorf("script must still add the fstab entry:\n%s", script)
+	}
+}
+
+func TestWaitUntilCommandComplete_IncludesStandardError(t *testing.T) {
+	mock := &mockSSMAPI{
+		getCommandInvocationFn: func(ctx context.Context, params *ssm.GetCommandInvocationInput, optFns ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error) {
+			return &ssm.GetCommandInvocationOutput{
+				Status:               ssmtypes.CommandInvocationStatusFailed,
+				StandardErrorContent: aws.String("bootstrap in progress\n"),
+			}, nil
+		},
+	}
+	client := fastSSMClient(mock)
+
+	err := client.WaitUntilCommandComplete(context.Background(), "i-123", "cmd-abc")
+	if err == nil || !strings.HasSuffix(err.Error(), ": bootstrap in progress") {
+		t.Errorf("error = %v, want it to end with the trimmed stderr", err)
+	}
+}
+
+// --- SendCommand retry while SSM can't reach the instance ---
+
+func TestSendCommand_RetriesUntilInstanceReachable(t *testing.T) {
+	senders := map[string]func(*SSMClient) (string, error){
+		"RunS3Mount": func(c *SSMClient) (string, error) {
+			return c.RunS3Mount(context.Background(), "i-123", "clouddesktop-john-dev")
+		},
+		"RunFilesystemExtension": func(c *SSMClient) (string, error) {
+			return c.RunFilesystemExtension(context.Background(), "i-123")
+		},
+	}
+
+	for name, send := range senders {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			mock := &mockSSMAPI{
+				sendCommandFn: func(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
+					calls++
+					if calls < 3 {
+						return nil, errors.New("api error InvalidInstanceId: Instances [[i-123]] not in a valid state")
+					}
+					return &ssm.SendCommandOutput{Command: &ssmtypes.Command{CommandId: aws.String("cmd-ok")}}, nil
+				},
+			}
+
+			commandID, err := send(fastSSMClient(mock))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if commandID != "cmd-ok" || calls != 3 {
+				t.Errorf("commandID=%q calls=%d, want cmd-ok after 3 calls", commandID, calls)
+			}
+		})
+	}
+}
+
+func TestSendCommand_GivesUpAfterLimit(t *testing.T) {
+	mock := &mockSSMAPI{
+		sendCommandFn: func(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
+			return nil, errors.New("api error InvalidInstanceId: not in a valid state")
+		},
+	}
+
+	_, err := fastSSMClient(mock).RunS3Mount(context.Background(), "i-123", "clouddesktop-john-dev")
+	if err == nil || !strings.Contains(err.Error(), "SSM can't reach instance i-123 yet") {
+		t.Errorf("error = %v, want it to say SSM can't reach the instance", err)
+	}
+}
+
+func TestSendCommand_DoesNotRetryOtherErrors(t *testing.T) {
+	calls := 0
+	mock := &mockSSMAPI{
+		sendCommandFn: func(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
+			calls++
+			return nil, errors.New("AccessDeniedException")
+		},
+	}
+
+	if _, err := fastSSMClient(mock).RunS3Mount(context.Background(), "i-123", "b"); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Errorf("SendCommand calls = %d, want 1", calls)
 	}
 }

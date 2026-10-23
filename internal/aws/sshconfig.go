@@ -6,6 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/nbugash-viafoura/clouddesktop/internal/environment"
+	"github.com/nbugash-viafoura/clouddesktop/internal/fsutil"
 )
 
 const (
@@ -17,14 +20,12 @@ const (
 
 // SSMProxyDeps holds the resolved paths for binaries needed by the SSM proxy script.
 type SSMProxyDeps struct {
-	AWSPath                  string // absolute path to aws CLI
-	SessionManagerPluginDir  string // directory containing session-manager-plugin
+	AWSPath                 string // absolute path to aws CLI
+	SessionManagerPluginDir string // directory containing session-manager-plugin
 }
 
-// SSHConfigEntry represents the SSH config block for a cloud desktop instance.
-type SSHConfigEntry struct {
-	HostAlias    string // e.g. "clouddesktop"
-	InstanceID   string
+// SSHSettings holds the connection settings shared by every environment's SSH entry.
+type SSHSettings struct {
 	User         string // e.g. "ubuntu"
 	IdentityFile string // path to the private key
 	AWSProfile   string
@@ -56,7 +57,7 @@ func resolveSSMProxyDepsUsing(lookPath func(string) (string, error)) (SSMProxyDe
 }
 
 // renderProxyScript produces the shell script content for the SSM proxy.
-func renderProxyScript(deps SSMProxyDeps, entry SSHConfigEntry) string {
+func renderProxyScript(deps SSMProxyDeps, settings SSHSettings) string {
 	awsDir := filepath.Dir(deps.AWSPath)
 	return fmt.Sprintf(`#!/bin/bash
 export PATH="%s:%s:$PATH"
@@ -66,12 +67,12 @@ export PATH="%s:%s:$PATH"
   --parameters "portNumber=$2" \
   --profile %s \
   --region %s
-`, deps.SessionManagerPluginDir, awsDir, deps.AWSPath, entry.AWSProfile, entry.Region)
+`, deps.SessionManagerPluginDir, awsDir, deps.AWSPath, settings.AWSProfile, settings.Region)
 }
 
 // writeProxyScriptTo writes the proxy script to the given path with mode 0755.
-func writeProxyScriptTo(scriptPath string, deps SSMProxyDeps, entry SSHConfigEntry) error {
-	content := renderProxyScript(deps, entry)
+func writeProxyScriptTo(scriptPath string, deps SSMProxyDeps, settings SSHSettings) error {
+	content := renderProxyScript(deps, settings)
 	if err := os.WriteFile(scriptPath, []byte(content), 0755); err != nil {
 		return fmt.Errorf("failed to write SSM proxy script: %w", err)
 	}
@@ -83,56 +84,6 @@ func removeProxyScript(scriptPath string) error {
 	if err := os.Remove(scriptPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove SSM proxy script: %w", err)
 	}
-	return nil
-}
-
-// WriteSSHConfig writes or updates the SSH config entry for the cloud desktop.
-// It resolves the absolute paths of aws and session-manager-plugin, generates
-// a proxy wrapper script at ~/.ssh/clouddesktop-ssm-proxy.sh, then writes the
-// SSH config block referencing that script. The .ssh directory is created with
-// mode 0700 if it does not already exist.
-func WriteSSHConfig(entry SSHConfigEntry) error {
-	sshDir, configPath, err := sshConfigPath()
-	if err != nil {
-		return err
-	}
-
-	deps, err := resolveSSMProxyDeps()
-	if err != nil {
-		return err
-	}
-
-	scriptPath := filepath.Join(sshDir, proxyScriptName)
-	return writeSSHConfigWithProxy(sshDir, configPath, scriptPath, deps, entry)
-}
-
-// writeSSHConfigWithProxy contains the core logic for writing both the proxy
-// script and the SSH config block. Accepts explicit paths for testability.
-func writeSSHConfigWithProxy(sshDir, configPath, scriptPath string, deps SSMProxyDeps, entry SSHConfigEntry) error {
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		return fmt.Errorf("failed to create .ssh directory: %w", err)
-	}
-
-	if err := writeProxyScriptTo(scriptPath, deps, entry); err != nil {
-		return err
-	}
-
-	existing, err := readSSHConfig(configPath)
-	if err != nil {
-		return err
-	}
-
-	if err := backupSSHConfig(sshDir, configPath); err != nil {
-		return err
-	}
-
-	block := renderSSHConfigBlock(entry, scriptPath)
-	updated := replaceOrAppendBlock(existing, block)
-
-	if err := os.WriteFile(configPath, []byte(updated), 0600); err != nil {
-		return fmt.Errorf("failed to write SSH config: %w", err)
-	}
-
 	return nil
 }
 
@@ -181,11 +132,74 @@ func readSSHConfig(path string) (string, error) {
 	return string(data), nil
 }
 
-// renderSSHConfigBlock produces the full managed block string including markers.
-// proxyScriptAbsPath is the absolute path to the SSM proxy wrapper script.
-func renderSSHConfigBlock(entry SSHConfigEntry, proxyScriptAbsPath string) string {
-	return fmt.Sprintf(`%s
-Host %s
+// SyncSSHConfig rewrites the clouddesktop-managed block in ~/.ssh/config so it
+// holds exactly one Host entry per environment, and writes the shared SSM proxy
+// script. With no environments, the block and the proxy script are removed.
+// Content outside the managed block is never modified.
+func SyncSSHConfig(envs []environment.Environment, settings SSHSettings) error {
+	sshDir, configPath, err := sshConfigPath()
+	if err != nil {
+		return err
+	}
+
+	var deps SSMProxyDeps
+	if len(envs) > 0 {
+		if deps, err = resolveSSMProxyDeps(); err != nil {
+			return err
+		}
+	}
+
+	return syncSSHConfigAt(sshDir, configPath, filepath.Join(sshDir, proxyScriptName), deps, envs, settings)
+}
+
+// syncSSHConfigAt contains the core of SyncSSHConfig, operating on explicit paths for testability.
+func syncSSHConfigAt(sshDir, configPath, scriptPath string, deps SSMProxyDeps, envs []environment.Environment, settings SSHSettings) error {
+	existing, err := readSSHConfig(configPath)
+	if err != nil {
+		return err
+	}
+
+	var updated string
+	if len(envs) == 0 {
+		if err := removeProxyScript(scriptPath); err != nil {
+			return err
+		}
+		updated = removeManagedBlock(existing)
+		if updated == existing {
+			return nil
+		}
+	} else {
+		if err := os.MkdirAll(sshDir, 0700); err != nil {
+			return fmt.Errorf("failed to create .ssh directory: %w", err)
+		}
+		if err := writeProxyScriptTo(scriptPath, deps, settings); err != nil {
+			return err
+		}
+		updated = replaceOrAppendBlock(existing, renderManagedBlock(envs, settings, scriptPath))
+	}
+
+	if err := backupSSHConfig(sshDir, configPath); err != nil {
+		return err
+	}
+	if err := fsutil.WriteFileAtomic(configPath, []byte(updated), 0600); err != nil {
+		return fmt.Errorf("failed to write SSH config: %w", err)
+	}
+	return nil
+}
+
+// renderManagedBlock produces the managed block with one Host entry per
+// environment, sorted by name so rewrites produce stable diffs.
+func renderManagedBlock(envs []environment.Environment, settings SSHSettings, proxyScriptPath string) string {
+	sorted := append([]environment.Environment(nil), envs...)
+	environment.SortByName(sorted)
+
+	var b strings.Builder
+	b.WriteString(sshConfigBeginMarker + "\n")
+	for i, env := range sorted {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, `Host %s
   HostName %s
   User %s
   IdentityFile %s
@@ -194,69 +208,42 @@ Host %s
   ServerAliveInterval 60
   ServerAliveCountMax 3
   StrictHostKeyChecking accept-new
-%s`,
-		sshConfigBeginMarker,
-		entry.HostAlias,
-		entry.InstanceID,
-		entry.User,
-		entry.IdentityFile,
-		proxyScriptAbsPath,
-		sshConfigEndMarker,
-	)
+`, strings.Join(env.SSHAliases(), " "), env.InstanceID, settings.User, settings.IdentityFile, proxyScriptPath)
+	}
+	b.WriteString(sshConfigEndMarker)
+	return b.String()
 }
 
-// RemoveSSHConfig removes the clouddesktop-managed block from ~/.ssh/config,
-// deletes the proxy script, and removes the backup file. If none of these
-// exist, this is a no-op.
-func RemoveSSHConfig() error {
-	sshDir, configPath, err := sshConfigPath()
+// HostDefinedOutsideBlock reports whether ~/.ssh/config defines a Host entry
+// for alias outside the clouddesktop-managed block, i.e. one the user owns.
+func HostDefinedOutsideBlock(alias string) (bool, error) {
+	_, configPath, err := sshConfigPath()
 	if err != nil {
-		return err
+		return false, err
 	}
-
-	if err := removeSSHConfigFrom(configPath); err != nil {
-		return err
-	}
-
-	if err := removeProxyScript(filepath.Join(sshDir, proxyScriptName)); err != nil {
-		return err
-	}
-
-	backupPath := filepath.Join(sshDir, sshConfigBackupName)
-	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove SSH config backup: %w", err)
-	}
-	return nil
+	return hostDefinedOutsideBlockAt(configPath, alias)
 }
 
-// removeSSHConfigFrom contains the core SSH config removal logic, operating on an
-// explicit path rather than the user's home directory. This enables testing.
-func removeSSHConfigFrom(configPath string) error {
+// hostDefinedOutsideBlockAt checks the whitespace-separated patterns on every
+// Host line outside the managed block for an exact match of alias.
+func hostDefinedOutsideBlockAt(configPath, alias string) (bool, error) {
 	content, err := readSSHConfig(configPath)
 	if err != nil {
-		return err
-	}
-	if content == "" {
-		return nil
+		return false, err
 	}
 
-	updated := removeManagedBlock(content)
-	if updated == content {
-		return nil
-	}
-
-	sshDir := filepath.Dir(configPath)
-	backupPath := filepath.Join(sshDir, sshConfigBackupName)
-	if _, err := os.Stat(backupPath); err == nil {
-		if err := backupSSHConfig(sshDir, configPath); err != nil {
-			return err
+	for _, line := range strings.Split(removeManagedBlock(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "Host") {
+			continue
+		}
+		for _, pattern := range fields[1:] {
+			if pattern == alias {
+				return true, nil
+			}
 		}
 	}
-
-	if err := os.WriteFile(configPath, []byte(updated), 0600); err != nil {
-		return fmt.Errorf("failed to write SSH config: %w", err)
-	}
-	return nil
+	return false, nil
 }
 
 // removeManagedBlock removes the clouddesktop-managed block from the SSH config content.
